@@ -2,6 +2,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// User settings. Each limit is an estimate the user calibrates, because Anthropic does not publish it.
@@ -13,6 +14,10 @@ pub struct Config {
     pub window_hours: f64,
     /// Limit for the weekly window.
     pub weekly_limit_tokens: Option<u64>,
+    /// A time the 5-hour window resets, from the user's settings. Windows are counted from resets.
+    pub five_hour_reset: Option<DateTime<Utc>>,
+    /// A time the weekly window resets.
+    pub weekly_reset: Option<DateTime<Utc>>,
 }
 
 impl Default for Config {
@@ -21,6 +26,8 @@ impl Default for Config {
             limit_tokens: None,
             window_hours: 5.0,
             weekly_limit_tokens: None,
+            five_hour_reset: None,
+            weekly_reset: None,
         }
     }
 }
@@ -76,6 +83,8 @@ mod tests {
             limit_tokens: Some(5_000_000),
             window_hours: 5.0,
             weekly_limit_tokens: Some(40_000_000),
+            five_hour_reset: Some("2026-10-29T14:20:00Z".parse().expect("valid time")),
+            weekly_reset: None,
         };
 
         save_config(&path, &config).expect("save config");

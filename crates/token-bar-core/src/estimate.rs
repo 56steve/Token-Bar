@@ -36,8 +36,18 @@ impl Estimator {
         })
     }
 
+    /// Measures usage over the rolling window that ends at `now`.
     pub fn snapshot(&self, records: &[UsageRecord], now: DateTime<Utc>) -> Snapshot {
-        let window_start = now - self.window;
+        self.snapshot_since(records, now - self.window, now)
+    }
+
+    /// Measures usage from `window_start` to `now`, for windows anchored to a reset time.
+    pub fn snapshot_since(
+        &self,
+        records: &[UsageRecord],
+        window_start: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Snapshot {
         let in_window: Vec<&UsageRecord> = records
             .iter()
             .filter(|r| r.timestamp >= window_start && r.timestamp <= now)

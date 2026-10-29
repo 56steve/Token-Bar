@@ -2,11 +2,11 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
-use chrono::{Duration, Utc};
-use serde_json::{Map, Value};
+use chrono::{DateTime, Duration, Utc};
+use serde_json::{json, Map, Value};
 use token_bar_core::{
-    default_config_path, default_logs_root, limit_from_percent, load_config, save_config,
-    scan_records, Config, Estimator, Snapshot, UsageRecord,
+    default_config_path, default_logs_root, limit_from_percent, load_config, next_reset,
+    save_config, scan_records, window_start, Config, Estimator, Snapshot,
 };
 
 const PACE_WINDOW_MINUTES: i64 = 30;
@@ -17,15 +17,15 @@ const ROUGH_ESTIMATE_BELOW_PERCENT: f64 = 10.0;
 
 const USAGE: &str = "\
 Usage:
-  token-bar                    Show usage against both limits
-  token-bar --json             Same, as JSON for scripts and plugins
-  token-bar calibrate          Set both limits from the percents Claude shows you
-  token-bar calibrate <n>      Set the 5-hour limit from the percent shown, such as 40
-  token-bar calibrate --weekly <n>
-                               Set the weekly limit from the percent shown, such as 78
-  token-bar calibrate --tokens <n>
-                               Set the 5-hour limit directly, in tokens
-  token-bar help               Show this help";
+  token-bar                              Show usage against both limits
+  token-bar --json                       Same, as JSON for scripts and plugins
+  token-bar calibrate                    Set both limits, asking for each percent and reset time
+  token-bar calibrate <percent> \"<reset>\"
+                                         Set the 5-hour limit, such as 21 \"2:20 PM\"
+  token-bar calibrate --weekly <percent> \"<reset>\"
+                                         Set the weekly limit, such as 78 \"Sun 5:30 AM\"
+  token-bar calibrate --tokens <n>       Set the 5-hour limit directly, in tokens
+  token-bar help                         Show this help";
 
 /// One of the two limits Claude enforces.
 #[derive(Clone, Copy)]
@@ -49,6 +49,20 @@ impl Limit {
         }
     }
 
+    fn example_percent(self) -> &'static str {
+        match self {
+            Limit::FiveHour => "40",
+            Limit::Weekly => "78",
+        }
+    }
+
+    fn example_reset(self) -> &'static str {
+        match self {
+            Limit::FiveHour => "2:20 PM",
+            Limit::Weekly => "Sun 5:30 AM",
+        }
+    }
+
     fn hours(self, config: &Config) -> f64 {
         match self {
             Limit::FiveHour => config.window_hours,
@@ -63,10 +77,24 @@ impl Limit {
         }
     }
 
-    fn set(self, config: &mut Config, limit: u64) {
+    fn reset(self, config: &Config) -> Option<DateTime<Utc>> {
+        match self {
+            Limit::FiveHour => config.five_hour_reset,
+            Limit::Weekly => config.weekly_reset,
+        }
+    }
+
+    fn set_limit(self, config: &mut Config, limit: u64) {
         match self {
             Limit::FiveHour => config.limit_tokens = Some(limit),
             Limit::Weekly => config.weekly_limit_tokens = Some(limit),
+        }
+    }
+
+    fn set_reset(self, config: &mut Config, reset: DateTime<Utc>) {
+        match self {
+            Limit::FiveHour => config.five_hour_reset = Some(reset),
+            Limit::Weekly => config.weekly_reset = Some(reset),
         }
     }
 }
@@ -95,11 +123,17 @@ fn run(args: &[String]) -> Result<String, String> {
         [] => status_or_setup(&config_path, false),
         ["--json"] => status(&config_path, true),
         ["calibrate"] => calibrate_interactive(&config_path),
-        ["calibrate", "--weekly", percent] => {
-            calibrate_percent(&config_path, Limit::Weekly, percent)
-        }
         ["calibrate", "--tokens", tokens] => calibrate_tokens(&config_path, tokens),
-        ["calibrate", percent] => calibrate_percent(&config_path, Limit::FiveHour, percent),
+        ["calibrate", "--weekly", percent] => {
+            calibrate_percent(&config_path, Limit::Weekly, percent, None)
+        }
+        ["calibrate", "--weekly", percent, reset] => {
+            calibrate_percent(&config_path, Limit::Weekly, percent, Some(reset))
+        }
+        ["calibrate", percent] => calibrate_percent(&config_path, Limit::FiveHour, percent, None),
+        ["calibrate", percent, reset] => {
+            calibrate_percent(&config_path, Limit::FiveHour, percent, Some(reset))
+        }
         ["help" | "--help" | "-h"] => Ok(USAGE.to_string()),
         _ => Err(format!("unknown command\n\n{USAGE}")),
     }
@@ -107,16 +141,15 @@ fn run(args: &[String]) -> Result<String, String> {
 
 /// On first run in a terminal, asks for the percents once. Scripts and pipes never get a prompt.
 fn status_or_setup(config_path: &Path, json: bool) -> Result<String, String> {
-    let config = load_config(config_path);
     let needs_setup = LIMITS
         .iter()
-        .all(|limit| limit.configured(&config).is_none());
+        .all(|limit| limit.configured(&load_config(config_path)).is_none());
     if needs_setup && !json && io::stdin().is_terminal() {
         let setup = calibrate_interactive(config_path)?;
-        if LIMITS
+        let still_unset = LIMITS
             .iter()
-            .all(|limit| limit.configured(&load_config(config_path)).is_none())
-        {
+            .all(|limit| limit.configured(&load_config(config_path)).is_none());
+        if still_unset {
             return Ok(setup);
         }
         return Ok(format!("{setup}\n\n{}", status(config_path, false)?));
@@ -124,42 +157,71 @@ fn status_or_setup(config_path: &Path, json: bool) -> Result<String, String> {
     status(config_path, json)
 }
 
+/// Start of the window that is current now. Counted from the last reset when one is known,
+/// otherwise from a rolling point in the past.
+fn current_window_start(limit: Limit, config: &Config, now: DateTime<Utc>) -> DateTime<Utc> {
+    let period = hours_to_duration(limit.hours(config));
+    match limit.reset(config) {
+        Some(anchor) => window_start(anchor, period, now),
+        None => now - period,
+    }
+}
+
 fn status(config_path: &Path, json: bool) -> Result<String, String> {
     let config = load_config(config_path);
     let root = default_logs_root().ok_or("could not find your home folder")?;
     let now = Utc::now();
 
-    let longest = LIMITS
-        .iter()
+    let configured: Vec<Limit> = LIMITS
+        .into_iter()
         .filter(|limit| limit.configured(&config).is_some())
+        .collect();
+    let longest = configured
+        .iter()
         .map(|limit| limit.hours(&config))
         .fold(0.0_f64, f64::max);
-    if longest == 0.0 {
+    if configured.is_empty() {
         return Err("no limit set yet. Run: token-bar calibrate".to_string());
     }
     let records = scan_records(&root, now - hours_to_duration(longest));
 
-    let mut snapshots: Vec<(Limit, Snapshot)> = Vec::new();
-    for limit in LIMITS {
-        let Some(snapshot) = snapshot_for(&config, limit, &records, now)? else {
+    let mut reports = Vec::new();
+    for limit in configured {
+        let Some(limit_tokens) = limit.configured(&config) else {
             continue;
         };
-        snapshots.push((limit, snapshot));
+        let period = hours_to_duration(limit.hours(&config));
+        let start = current_window_start(limit, &config, now);
+        let estimator =
+            Estimator::new(limit_tokens, period, Duration::minutes(PACE_WINDOW_MINUTES))
+                .ok_or("the limit must be above zero")?;
+        let snapshot = estimator.snapshot_since(&records, start, now);
+        let resets_at = limit.reset(&config).map(|_| start + period);
+        reports.push((limit, snapshot, resets_at));
     }
 
     if json {
         let mut object = Map::new();
-        for (limit, snapshot) in &snapshots {
-            let value = serde_json::to_value(snapshot).map_err(|error| error.to_string())?;
+        for (limit, snapshot, resets_at) in &reports {
+            let mut value = serde_json::to_value(snapshot).map_err(|error| error.to_string())?;
+            if let Some(map) = value.as_object_mut() {
+                map.insert(
+                    "resets_at".to_string(),
+                    resets_at.map_or(Value::Null, |at| json!(at.to_rfc3339())),
+                );
+            }
             object.insert(limit.key().to_string(), value);
         }
         return serde_json::to_string_pretty(&Value::Object(object))
             .map_err(|error| error.to_string());
     }
 
-    let mut blocks: Vec<String> = snapshots
+    let mut blocks: Vec<String> = reports
         .iter()
-        .map(|(limit, snapshot)| render_block(*limit, snapshot))
+        .map(|(limit, snapshot, resets_at)| {
+            let resets_in = resets_at.map(|at| format_remaining(at - now));
+            render_block(*limit, snapshot, resets_in.as_deref())
+        })
         .collect();
     if records.is_empty() {
         blocks.push(format!(
@@ -169,65 +231,27 @@ fn status(config_path: &Path, json: bool) -> Result<String, String> {
     Ok(blocks.join("\n\n"))
 }
 
-fn snapshot_for(
-    config: &Config,
-    limit: Limit,
-    records: &[UsageRecord],
-    now: chrono::DateTime<Utc>,
-) -> Result<Option<Snapshot>, String> {
-    let Some(limit_tokens) = limit.configured(config) else {
-        return Ok(None);
-    };
-    let estimator = Estimator::new(
-        limit_tokens,
-        hours_to_duration(limit.hours(config)),
-        Duration::minutes(PACE_WINDOW_MINUTES),
-    )
-    .ok_or("the limit must be above zero")?;
-    Ok(Some(estimator.snapshot(records, now)))
-}
-
-fn render_block(limit: Limit, snapshot: &Snapshot) -> String {
-    let mut lines = vec![format!(
-        "{} usage   {}%",
-        limit.label(),
-        snapshot.percent.floor() as u64
-    )];
-
-    match (
-        snapshot.next_whole_percent,
-        snapshot.minutes_to_next_percent,
-    ) {
-        (_, _) if snapshot.percent >= 100.0 => lines.push("  Limit reached.".to_string()),
-        (Some(next), Some(minutes)) => lines.push(format!(
-            "  Next point   {next}% in about {} min",
-            minutes.round() as u64
-        )),
-        (Some(next), None) => lines.push(format!(
-            "  Next point   {next}%, no recent activity to estimate from"
-        )),
-        (None, _) => {}
-    }
-
-    lines.push(format!(
-        "  Pace         {} tokens per minute, last {PACE_WINDOW_MINUTES} min",
-        snapshot.tokens_per_minute.round() as u64
-    ));
-    lines.join("\n")
-}
-
-/// Asks for both percents Claude shows. Pressing Enter skips a question, and it is asked again next time.
 fn calibrate_interactive(config_path: &Path) -> Result<String, String> {
-    println!("Set up token-bar once. Check the usage percentages Claude shows you right now.");
-    let five_hour = ask("5-hour percent (for example 40), or press Enter to skip: ")?;
-    let weekly = ask("Weekly percent (for example 78), or press Enter to skip: ")?;
-
+    println!("Set up token-bar once. Check the usage Claude shows you right now.");
     let mut messages = Vec::new();
-    if let Some(percent) = five_hour {
-        messages.push(calibrate_percent(config_path, Limit::FiveHour, &percent)?);
-    }
-    if let Some(percent) = weekly {
-        messages.push(calibrate_percent(config_path, Limit::Weekly, &percent)?);
+    for limit in LIMITS {
+        let percent_question = format!(
+            "{} percent (for example {}), or press Enter to skip: ",
+            limit.label(),
+            limit.example_percent()
+        );
+        let Some(percent) = ask(&percent_question)? else {
+            continue;
+        };
+        let reset_question = format!(
+            "{} reset time (for example \"{}\"): ",
+            limit.label(),
+            limit.example_reset()
+        );
+        let reset = ask(&reset_question)?;
+        let message = calibrate_percent(config_path, limit, &percent, reset.as_deref())
+            .unwrap_or_else(|error| error);
+        messages.push(message);
     }
     if messages.is_empty() {
         return Ok("Skipped. Run token-bar calibrate when you're ready.".to_string());
@@ -252,21 +276,48 @@ fn ask(question: &str) -> Result<Option<String>, String> {
     })
 }
 
-fn calibrate_percent(config_path: &Path, limit: Limit, text: &str) -> Result<String, String> {
-    let percent = parse_percent(text)?;
+fn calibrate_percent(
+    config_path: &Path,
+    limit: Limit,
+    percent_text: &str,
+    reset_text: Option<&str>,
+) -> Result<String, String> {
+    let percent = parse_percent(percent_text)?;
     let mut config = load_config(config_path);
-    let root = default_logs_root().ok_or("could not find your home folder")?;
     let now = Utc::now();
-    let window = hours_to_duration(limit.hours(&config));
-    let used: u64 = scan_records(&root, now - window)
+
+    match reset_text {
+        Some(text) => {
+            let reset = next_reset(text, now).ok_or_else(|| {
+                format!(
+                    "'{text}' is not a reset time. Try something like \"{}\".",
+                    limit.example_reset()
+                )
+            })?;
+            limit.set_reset(&mut config, reset);
+        }
+        None if limit.reset(&config).is_none() => {
+            return Err(format!(
+                "the {} limit also needs its reset time, such as \"{}\".",
+                limit.label().to_lowercase(),
+                limit.example_reset()
+            ));
+        }
+        None => {}
+    }
+
+    let root = default_logs_root().ok_or("could not find your home folder")?;
+    let start = current_window_start(limit, &config, now);
+    let used: u64 = scan_records(&root, start)
         .iter()
+        .filter(|record| record.timestamp <= now)
         .map(|record| record.tokens)
         .sum();
     let limit_tokens = limit_from_percent(used, percent).ok_or(
-        "no Claude Code usage in the window yet, so there is nothing to calibrate against. Use Claude a little, then try again.",
+        "no Claude Code usage in this window yet, so there is nothing to calibrate against. Use Claude a little, then try again.",
     )?;
 
-    limit.set(&mut config, limit_tokens);
+    limit.set_limit(&mut config, limit_tokens);
     save_config(config_path, &config).map_err(|error| format!("could not save config: {error}"))?;
 
     let mut message = format!(
@@ -290,7 +341,7 @@ fn calibrate_tokens(config_path: &Path, tokens: &str) -> Result<String, String> 
         return Err("the limit must be above zero".to_string());
     }
     let mut config = load_config(config_path);
-    Limit::FiveHour.set(&mut config, limit);
+    Limit::FiveHour.set_limit(&mut config, limit);
     save_config(config_path, &config).map_err(|error| format!("could not save config: {error}"))?;
     Ok(format!("Limit set to {limit} tokens."))
 }
@@ -307,6 +358,53 @@ fn parse_percent(text: &str) -> Result<f64, String> {
     } else {
         Err(format!("'{text}' must be above 0 and at most 100"))
     }
+}
+
+fn format_remaining(remaining: Duration) -> String {
+    let minutes = remaining.num_minutes().max(0);
+    let days = minutes / (24 * 60);
+    let hours = (minutes % (24 * 60)) / 60;
+    let mins = minutes % 60;
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {mins}m")
+    } else {
+        format!("{mins} min")
+    }
+}
+
+fn render_block(limit: Limit, snapshot: &Snapshot, resets_in: Option<&str>) -> String {
+    let mut lines = vec![format!(
+        "{} usage   {}%",
+        limit.label(),
+        snapshot.percent.floor() as u64
+    )];
+
+    match (
+        snapshot.next_whole_percent,
+        snapshot.minutes_to_next_percent,
+    ) {
+        (_, _) if snapshot.percent >= 100.0 => lines.push("  Limit reached.".to_string()),
+        (Some(next), Some(minutes)) => lines.push(format!(
+            "  Next point   {next}% in about {} min",
+            minutes.round() as u64
+        )),
+        (Some(next), None) => lines.push(format!(
+            "  Next point   {next}%, no recent activity to estimate from"
+        )),
+        (None, _) => {}
+    }
+
+    if let Some(remaining) = resets_in {
+        lines.push(format!("  Resets       in {remaining}"));
+    }
+
+    lines.push(format!(
+        "  Pace         {} tokens per minute, last {PACE_WINDOW_MINUTES} min",
+        snapshot.tokens_per_minute.round() as u64
+    ));
+    lines.join("\n")
 }
 
 fn hours_to_duration(hours: f64) -> Duration {
@@ -328,33 +426,45 @@ mod tests {
     }
 
     #[test]
-    fn renders_a_block_with_percent_next_point_and_pace() {
-        let output = render_block(Limit::FiveHour, &snapshot(53.4, Some(54), Some(9.2)));
+    fn renders_a_block_with_percent_next_point_reset_and_pace() {
+        let output = render_block(
+            Limit::FiveHour,
+            &snapshot(53.4, Some(54), Some(9.2)),
+            Some("1h 50m"),
+        );
 
         assert!(output.contains("5-hour usage   53%"));
         assert!(output.contains("  Next point   54% in about 9 min"));
+        assert!(output.contains("  Resets       in 1h 50m"));
         assert!(output.contains("  Pace         11 tokens per minute, last 30 min"));
     }
 
     #[test]
+    fn omits_the_reset_line_for_a_rolling_window() {
+        let output = render_block(Limit::FiveHour, &snapshot(40.0, Some(41), Some(5.0)), None);
+
+        assert!(!output.contains("Resets"));
+    }
+
+    #[test]
     fn labels_the_weekly_block() {
-        let output = render_block(Limit::Weekly, &snapshot(78.0, Some(79), Some(600.0)));
+        let output = render_block(Limit::Weekly, &snapshot(78.0, Some(79), Some(600.0)), None);
 
         assert!(output.starts_with("Weekly usage   78%"));
     }
 
     #[test]
-    fn says_when_there_is_no_recent_activity() {
-        let output = render_block(Limit::FiveHour, &snapshot(50.0, Some(51), None));
+    fn reports_a_reached_limit() {
+        let output = render_block(Limit::Weekly, &snapshot(100.0, None, None), None);
 
-        assert!(output.contains("no recent activity to estimate from"));
+        assert!(output.contains("Limit reached."));
     }
 
     #[test]
-    fn reports_a_reached_limit() {
-        let output = render_block(Limit::Weekly, &snapshot(100.0, None, None));
-
-        assert!(output.contains("Limit reached."));
+    fn formats_time_until_reset_in_the_largest_useful_units() {
+        assert_eq!(format_remaining(Duration::minutes(45)), "45 min");
+        assert_eq!(format_remaining(Duration::minutes(110)), "1h 50m");
+        assert_eq!(format_remaining(Duration::hours(50)), "2d 2h");
     }
 
     #[test]
@@ -369,6 +479,16 @@ mod tests {
         assert!(parse_percent("0").is_err());
         assert!(parse_percent("150").is_err());
         assert!(parse_percent("lots").is_err());
+    }
+
+    #[test]
+    fn a_limit_without_a_reset_time_is_refused_before_anything_is_saved() {
+        let path = std::env::temp_dir().join("token-bar-cli-no-reset-never-written.json");
+
+        let result = calibrate_percent(&path, Limit::Weekly, "78", None);
+
+        assert!(result.is_err());
+        assert!(!path.exists());
     }
 
     #[test]
