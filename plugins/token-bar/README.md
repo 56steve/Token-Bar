@@ -1,22 +1,35 @@
 # token-bar plugin for Claude Code
 
-Adds a `/token` command that shows your Claude usage against your limit, and when the next whole percent lands.
+Shows your Claude usage against your 5-hour and weekly limits, and when the next whole percent lands. Type `/token` in Claude Code.
 
-The plugin runs the `token-bar` CLI from this repo, so install that first.
+## Install
 
-## Commands
+Inside Claude Code:
 
-- `/token`: show usage now.
-- `/token --json`: the same, as JSON.
-- `/token calibrate <percent>`: set your limit from the percentage Claude shows you, such as `/token calibrate 40`.
+```
+/plugin marketplace add 56steve/Token-Bar
+/plugin install token-bar --marketplace 56steve/Token-Bar
+```
 
-## Try it locally
+Nothing else is needed. The plugin uses Python 3, which macOS includes.
+
+## Use
+
+- `/token` shows both windows. The first time, it asks for your percent and reset time for each window in chat.
+- If you agree, `/token` can also add a status line that shows Claude's own numbers, so you don't have to enter them. Send one message in Claude Code after that.
+
+The skill is `token-bar:token`. Claude Code namespaces plugin commands by plugin name.
+
+## Local development
 
 From the repo root:
 
 ```bash
-cargo install --path crates/token-bar-cli
 claude --plugin-dir plugins/token-bar
 ```
 
-Then, inside Claude Code, run `/token`.
+Run the script's tests:
+
+```bash
+cd plugins/token-bar && python3 -m unittest discover -s tests
+```

@@ -1,0 +1,17 @@
+{
+  "name": "token-bar",
+  "owner": {
+    "name": "Steve",
+    "email": "stevejason639@gmail.com"
+  },
+  "metadata": {
+    "description": "See how close you are to your Claude usage limits, with /token."
+  },
+  "plugins": [
+    {
+      "name": "token-bar",
+      "source": "./plugins/token-bar",
+      "description": "Shows your Claude 5-hour and weekly usage against your limits, and when the next whole percent lands."
+    }
+  ]
+}
