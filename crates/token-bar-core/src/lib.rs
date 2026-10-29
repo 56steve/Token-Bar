@@ -6,6 +6,6 @@ mod record;
 mod scan;
 
 pub use config::{default_config_path, default_logs_root, load_config, save_config, Config};
-pub use estimate::{Estimator, Snapshot};
+pub use estimate::{limit_from_percent, Estimator, Snapshot};
 pub use record::{parse_line, UsageRecord};
 pub use scan::scan_records;

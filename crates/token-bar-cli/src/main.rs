@@ -1,20 +1,27 @@
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
 use chrono::{Duration, Utc};
 use token_bar_core::{
-    default_config_path, default_logs_root, load_config, save_config, scan_records, Estimator,
-    Snapshot,
+    default_config_path, default_logs_root, limit_from_percent, load_config, save_config,
+    scan_records, Config, Estimator, Snapshot,
 };
 
 const PACE_WINDOW_MINUTES: i64 = 30;
 
+/// Below this percent the estimate rests on little usage, so it is marked as rough.
+const ROUGH_ESTIMATE_BELOW_PERCENT: f64 = 10.0;
+
 const USAGE: &str = "\
 Usage:
-  token-bar                  Show usage against your limit
-  token-bar --json           Same, as JSON for scripts and plugins
-  token-bar calibrate <n>    Set your plan's limit, in tokens
-  token-bar help             Show this help";
+  token-bar                    Show usage against your limit
+  token-bar --json             Same, as JSON for scripts and plugins
+  token-bar calibrate          Set your limit from the percent Claude shows you
+  token-bar calibrate <n>      Same, with the percent as an argument, such as 40
+  token-bar calibrate --tokens <n>
+                               Set the limit directly, in tokens
+  token-bar help               Show this help";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -35,20 +42,35 @@ fn run(args: &[String]) -> Result<String, String> {
         default_config_path().ok_or("could not find a config folder for this user")?;
     let arguments: Vec<&str> = args.iter().map(String::as_str).collect();
     match arguments.as_slice() {
-        [] => status(&config_path, false),
+        [] => status_or_setup(&config_path, false),
         ["--json"] => status(&config_path, true),
-        ["calibrate", tokens] => calibrate(&config_path, tokens),
+        ["calibrate"] => calibrate_interactive(&config_path),
+        ["calibrate", "--tokens", tokens] => calibrate_tokens(&config_path, tokens),
+        ["calibrate", percent] => calibrate_percent(&config_path, percent),
         ["help" | "--help" | "-h"] => Ok(USAGE.to_string()),
         _ => Err(format!("unknown command\n\n{USAGE}")),
     }
+}
+
+/// On first run in a terminal, asks for the percent once. Scripts and pipes never get a prompt.
+fn status_or_setup(config_path: &Path, json: bool) -> Result<String, String> {
+    let needs_setup = load_config(config_path).limit_tokens.is_none();
+    if needs_setup && !json && io::stdin().is_terminal() {
+        let setup = calibrate_interactive(config_path)?;
+        if load_config(config_path).limit_tokens.is_none() {
+            return Ok(setup);
+        }
+        return Ok(format!("{setup}\n\n{}", status(config_path, false)?));
+    }
+    status(config_path, json)
 }
 
 fn status(config_path: &Path, json: bool) -> Result<String, String> {
     let config = load_config(config_path);
     let limit = config
         .limit_tokens
-        .ok_or("no limit set yet. Run: token-bar calibrate <tokens>")?;
-    let window = Duration::milliseconds((config.window_hours * 3_600_000.0) as i64);
+        .ok_or("no limit set yet. Run: token-bar calibrate")?;
+    let window = window_for(&config);
     let estimator = Estimator::new(limit, window, Duration::minutes(PACE_WINDOW_MINUTES))
         .ok_or("the limit must be above zero")?;
     let root = default_logs_root().ok_or("could not find your home folder")?;
@@ -64,7 +86,45 @@ fn status(config_path: &Path, json: bool) -> Result<String, String> {
     }
 }
 
-fn calibrate(config_path: &Path, tokens: &str) -> Result<String, String> {
+/// Asks for the percent Claude shows. Pressing Enter skips, and the question is asked again next time.
+fn calibrate_interactive(config_path: &Path) -> Result<String, String> {
+    println!("Set up token-bar once. Check the usage percentage Claude shows you right now.");
+    print!("Percent shown by Claude (for example 40), or press Enter to skip: ");
+    io::stdout().flush().map_err(|error| error.to_string())?;
+
+    let mut answer = String::new();
+    io::stdin()
+        .lock()
+        .read_line(&mut answer)
+        .map_err(|error| error.to_string())?;
+    if answer.trim().is_empty() {
+        return Ok("Skipped. Run token-bar calibrate when you're ready.".to_string());
+    }
+    calibrate_percent(config_path, answer.trim())
+}
+
+fn calibrate_percent(config_path: &Path, text: &str) -> Result<String, String> {
+    let percent = parse_percent(text)?;
+    let config = load_config(config_path);
+    let used = used_tokens_in_window(&config)?;
+    let limit = limit_from_percent(used, percent).ok_or(
+        "no Claude Code usage in the window yet, so there is nothing to calibrate against. Use Claude a little, then try again.",
+    )?;
+
+    save_limit(config_path, limit)?;
+    let mut message = format!(
+        "Calibrated. Your limit is about {limit} tokens per {}-hour window.",
+        config.window_hours
+    );
+    if percent < ROUGH_ESTIMATE_BELOW_PERCENT {
+        message.push_str(
+            " The estimate is rough at this usage. Calibrate again after more use for accuracy.",
+        );
+    }
+    Ok(message)
+}
+
+fn calibrate_tokens(config_path: &Path, tokens: &str) -> Result<String, String> {
     let limit: u64 = tokens
         .replace(',', "")
         .parse()
@@ -72,11 +132,39 @@ fn calibrate(config_path: &Path, tokens: &str) -> Result<String, String> {
     if limit == 0 {
         return Err("the limit must be above zero".to_string());
     }
+    save_limit(config_path, limit)?;
+    Ok(format!("Limit set to {limit} tokens."))
+}
 
+fn save_limit(config_path: &Path, limit: u64) -> Result<(), String> {
     let mut config = load_config(config_path);
     config.limit_tokens = Some(limit);
-    save_config(config_path, &config).map_err(|error| format!("could not save config: {error}"))?;
-    Ok(format!("Limit set to {limit} tokens."))
+    save_config(config_path, &config).map_err(|error| format!("could not save config: {error}"))
+}
+
+fn parse_percent(text: &str) -> Result<f64, String> {
+    let percent: f64 = text
+        .trim()
+        .trim_end_matches('%')
+        .trim()
+        .parse()
+        .map_err(|_| format!("'{text}' is not a percentage"))?;
+    if percent > 0.0 && percent <= 100.0 {
+        Ok(percent)
+    } else {
+        Err(format!("'{text}' must be above 0 and at most 100"))
+    }
+}
+
+fn window_for(config: &Config) -> Duration {
+    Duration::milliseconds((config.window_hours * 3_600_000.0) as i64)
+}
+
+fn used_tokens_in_window(config: &Config) -> Result<u64, String> {
+    let root = default_logs_root().ok_or("could not find your home folder")?;
+    let now = Utc::now();
+    let records = scan_records(&root, now - window_for(config));
+    Ok(records.iter().map(|record| record.tokens).sum())
 }
 
 fn render(snapshot: &Snapshot, window_hours: f64, no_records: bool) -> String {
@@ -162,11 +250,25 @@ mod tests {
     }
 
     #[test]
-    fn calibrate_saves_the_limit_and_accepts_commas() {
+    fn parses_percentages_with_or_without_a_sign() {
+        assert_eq!(parse_percent("40"), Ok(40.0));
+        assert_eq!(parse_percent(" 40% "), Ok(40.0));
+        assert_eq!(parse_percent("100"), Ok(100.0));
+    }
+
+    #[test]
+    fn rejects_percentages_outside_zero_to_hundred_and_non_numbers() {
+        assert!(parse_percent("0").is_err());
+        assert!(parse_percent("150").is_err());
+        assert!(parse_percent("lots").is_err());
+    }
+
+    #[test]
+    fn tokens_calibration_saves_the_limit_and_accepts_commas() {
         let dir = std::env::temp_dir().join(format!("token-bar-cli-{}", std::process::id()));
         let path = dir.join("config.json");
 
-        let message = calibrate(&path, "5,000,000").expect("valid limit");
+        let message = calibrate_tokens(&path, "5,000,000").expect("valid limit");
 
         assert_eq!(message, "Limit set to 5000000 tokens.");
         assert_eq!(load_config(&path).limit_tokens, Some(5_000_000));
@@ -174,10 +276,10 @@ mod tests {
     }
 
     #[test]
-    fn calibrate_rejects_non_numbers_and_zero() {
+    fn tokens_calibration_rejects_non_numbers_and_zero() {
         let path = std::env::temp_dir().join("token-bar-cli-never-written.json");
 
-        assert!(calibrate(&path, "lots").is_err());
-        assert!(calibrate(&path, "0").is_err());
+        assert!(calibrate_tokens(&path, "lots").is_err());
+        assert!(calibrate_tokens(&path, "0").is_err());
     }
 }

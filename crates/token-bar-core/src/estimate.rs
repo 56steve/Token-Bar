@@ -80,6 +80,18 @@ impl Estimator {
     }
 }
 
+/// Works out a user's limit from the percent Claude shows them for the same window.
+///
+/// For example, 4,000,000 tokens at 40% means a limit of 10,000,000. Returns `None`
+/// when there is no usage yet or the percent is not above 0 and at most 100.
+pub fn limit_from_percent(used_tokens: u64, percent: f64) -> Option<u64> {
+    if used_tokens == 0 || !(percent > 0.0 && percent <= 100.0) {
+        return None;
+    }
+    let limit = (used_tokens as f64 / (percent / 100.0)).round();
+    Some(limit as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +157,19 @@ mod tests {
 
         assert_eq!(snapshot.next_whole_percent, None);
         assert_eq!(snapshot.minutes_to_next_percent, None);
+    }
+
+    #[test]
+    fn limit_is_used_tokens_divided_by_the_shown_percent() {
+        assert_eq!(limit_from_percent(4_000_000, 40.0), Some(10_000_000));
+        assert_eq!(limit_from_percent(53, 100.0), Some(53));
+    }
+
+    #[test]
+    fn no_limit_without_usage_or_with_an_out_of_range_percent() {
+        assert_eq!(limit_from_percent(0, 40.0), None);
+        assert_eq!(limit_from_percent(100, 0.0), None);
+        assert_eq!(limit_from_percent(100, 150.0), None);
     }
 
     #[test]
