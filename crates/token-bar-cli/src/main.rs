@@ -1,4 +1,4 @@
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -6,8 +6,8 @@ use chrono::{DateTime, Duration, Utc};
 use serde_json::{json, Map, Value};
 use token_bar_core::{
     default_config_path, default_live_path, default_logs_root, limit_from_percent, load_config,
-    load_live, next_reset, save_config, scan_records, window_start, Config, Estimator, LiveLimits,
-    LiveWindow, UsageRecord,
+    load_live, next_reset, save_config, save_live_from_payload, scan_records, window_start, Config,
+    Estimator, LiveLimits, LiveWindow, UsageRecord,
 };
 
 const PACE_WINDOW_MINUTES: i64 = 30;
@@ -26,6 +26,7 @@ Usage:
   token-bar calibrate --weekly <percent> \"<reset>\"
                                          Set the weekly limit, such as 78 \"Sun 5:30 AM\"
   token-bar calibrate --tokens <n>       Set the 5-hour limit directly, in tokens
+  token-bar statusline                   Used by Claude Code's status line to save Claude's readings
   token-bar help                         Show this help
 
 When the Claude Code status line is set up, token-bar reads Claude's own
@@ -135,6 +136,10 @@ struct View {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("statusline") {
+        println!("{}", statusline());
+        return ExitCode::SUCCESS;
+    }
     match run(&args) {
         Ok(output) => {
             println!("{output}");
@@ -169,6 +174,35 @@ fn run(args: &[String]) -> Result<String, String> {
         ["help" | "--help" | "-h"] => Ok(USAGE.to_string()),
         _ => Err(format!("unknown command\n\n{USAGE}")),
     }
+}
+
+/// Run by Claude Code's status line. Saves Claude's rate limits from the payload on stdin and
+/// prints a short summary. Save errors go to stderr only, so the status line never breaks.
+fn statusline() -> String {
+    let mut payload = String::new();
+    let _ = io::stdin().read_to_string(&mut payload);
+    if let Some(path) = default_live_path() {
+        if let Err(error) = save_live_from_payload(&payload, &path, Utc::now()) {
+            eprintln!("token-bar: could not save readings: {error}");
+        }
+    }
+    statusline_summary()
+}
+
+fn statusline_summary() -> String {
+    let Some(live) = live_readings() else {
+        return "token-bar: no readings yet".to_string();
+    };
+    let parts: Vec<String> = [
+        ("5h", live.five_hour.as_ref()),
+        ("week", live.seven_day.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(name, window)| {
+        window.map(|w| format!("{name} {}%", w.used_percentage.floor() as u64))
+    })
+    .collect();
+    parts.join(" · ")
 }
 
 /// On first run in a terminal, asks for the percents once. Scripts and pipes never get a prompt.

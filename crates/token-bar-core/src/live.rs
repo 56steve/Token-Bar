@@ -1,4 +1,5 @@
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, TimeZone, Utc};
@@ -59,6 +60,27 @@ pub fn load_live(path: &Path) -> Option<LiveLimits> {
     parse_live(&fs::read_to_string(path).ok()?)
 }
 
+/// Saves the rate limits from a Claude Code status-line payload, atomically.
+///
+/// Returns `Ok(false)` when the payload has no rate limits, such as API-key sessions.
+pub fn save_live_from_payload(payload: &str, path: &Path, now: DateTime<Utc>) -> io::Result<bool> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return Ok(false);
+    };
+    let Some(rate_limits) = value.get("rate_limits").filter(|limits| !limits.is_null()) else {
+        return Ok(false);
+    };
+
+    let saved = serde_json::json!({ "rate_limits": rate_limits, "saved_at": now.timestamp() });
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, saved.to_string())?;
+    fs::rename(&tmp, path)?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,6 +116,36 @@ mod tests {
     fn rejects_text_in_the_wrong_shape() {
         assert!(parse_live("{not json").is_none());
         assert!(parse_live(r#"{"something":"else"}"#).is_none());
+    }
+
+    #[test]
+    fn saves_rate_limits_from_a_status_line_payload() {
+        let dir = std::env::temp_dir().join(format!("token-bar-save-{}", std::process::id()));
+        let path = dir.join("rate_limits.json");
+        let payload = r#"{"model":{"display_name":"Opus"},"rate_limits":{"five_hour":{"used_percentage":21.4,"resets_at":1793336400}}}"#;
+        let now = Utc
+            .timestamp_opt(1_793_259_701, 0)
+            .single()
+            .expect("valid time");
+
+        let saved = save_live_from_payload(payload, &path, now).expect("save");
+
+        assert!(saved);
+        let live = load_live(&path).expect("saved file reads back");
+        assert_eq!(live.saved_at, now);
+        assert!((live.five_hour.expect("five-hour").used_percentage - 21.4).abs() < 1e-9);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_payload_without_rate_limits_saves_nothing() {
+        let dir = std::env::temp_dir().join(format!("token-bar-nosave-{}", std::process::id()));
+        let path = dir.join("rate_limits.json");
+
+        let saved = save_live_from_payload(r#"{"model":{}}"#, &path, Utc::now()).expect("no error");
+
+        assert!(!saved);
+        assert!(!path.exists());
     }
 
     #[test]
