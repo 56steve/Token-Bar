@@ -1,0 +1,11 @@
+{
+  "name": "token-bar",
+  "description": "See how close you are to your Claude usage limit, and when the next whole percent lands. Runs the token-bar CLI locally.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Steve",
+    "email": "stevejason639@gmail.com"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/56steve/Token-Bar"
+}
