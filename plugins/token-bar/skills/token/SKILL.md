@@ -1,5 +1,6 @@
 ---
-description: Show your Claude usage against your limit, and when the next whole percent lands
+name: token
+description: Show your Claude usage against your limit, and when the next whole percent lands. Use when the user runs /token or asks how close they are to their Claude limit.
 argument-hint: [calibrate <percent>] [--json]
 allowed-tools: Bash(token-bar:*)
 ---
