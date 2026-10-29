@@ -1,0 +1,17 @@
+[package]
+name = "token-bar"
+description = "Shows how close you are to your Claude usage limit, and when the next whole percent lands."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "token-bar"
+path = "src/main.rs"
+
+[dependencies]
+token-bar-core = { path = "../token-bar-core" }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+serde_json = "1"

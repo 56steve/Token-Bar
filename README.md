@@ -6,6 +6,18 @@ token-bar is a macOS menu bar app. It reads the session logs that Claude Code al
 
 Status: early development. Not released yet.
 
+## Build and test
+
+Requires macOS 13 or later and a Swift 6 toolchain (Xcode or the command-line tools).
+
+```bash
+swift build
+swift test
+swift run token-bar
+```
+
+Anthropic doesn't publish plan limits, so the app asks you for your limit in tokens once. The count is an estimate and can be recalibrated.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
