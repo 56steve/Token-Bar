@@ -34,7 +34,7 @@ Run `/token-bar:token` in Claude Code. The first time, it asks two quick questio
 
 After that, it shows your usage every time.
 
-For the most accurate numbers, turn on the **live status line**. `/token` will offer this in chat. It reads Claude's own percentages, so you won't have to enter anything. After you turn it on, send one message in Claude Code, then run `/token-bar:token` again.
+For the most accurate numbers, turn on the **live status line**. `/token-bar:token` will offer this in chat. It reads Claude's own percentages, so you won't have to enter anything. After you turn it on, send one message in Claude Code, then run `/token-bar:token` again.
 
 ## How it works
 
