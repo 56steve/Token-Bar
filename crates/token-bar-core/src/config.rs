@@ -4,12 +4,15 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// User settings. The limit is an estimate the user calibrates, because Anthropic does not publish it.
+/// User settings. Each limit is an estimate the user calibrates, because Anthropic does not publish it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Limit for the rolling window of `window_hours`, such as the 5-hour limit.
     pub limit_tokens: Option<u64>,
     pub window_hours: f64,
+    /// Limit for the weekly window.
+    pub weekly_limit_tokens: Option<u64>,
 }
 
 impl Default for Config {
@@ -17,6 +20,7 @@ impl Default for Config {
         Self {
             limit_tokens: None,
             window_hours: 5.0,
+            weekly_limit_tokens: None,
         }
     }
 }
@@ -71,6 +75,7 @@ mod tests {
         let config = Config {
             limit_tokens: Some(5_000_000),
             window_hours: 5.0,
+            weekly_limit_tokens: Some(40_000_000),
         };
 
         save_config(&path, &config).expect("save config");
