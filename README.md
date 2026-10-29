@@ -2,7 +2,7 @@
 
 **See how close you are to your Claude usage limit, right inside Claude Code.**
 
-Type `/token` and see your 5-hour and weekly usage, plus when the next whole percent lands. Your numbers stay on your machine.
+Run `/token-bar:token` and see your 5-hour and weekly usage, plus when the next whole percent lands. Your numbers stay on your machine.
 
 ```
 5-hour usage   21%
