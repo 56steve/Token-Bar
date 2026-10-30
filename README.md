@@ -66,8 +66,6 @@ There is nothing to set up. Codex already writes your limits into its own sessio
 | :- | :- | :- |
 | Claude Code | Supported | Claude's own percentages through the status line, or an estimate from your session logs |
 | Codex | Supported | The limits Codex records in its own session logs |
-| Gemini CLI | Not supported | Gemini CLI fetches your quota live from Google and never saves it on your machine, so there is nothing to read. Its own `/stats model` command shows it |
-| Cursor | Not supported | Its usage lives on Cursor's servers, not on your machine |
 
 ## Good to know
 
