@@ -103,8 +103,8 @@ class UsageTests(unittest.TestCase):
         text = token_bar.build_report(self.home, self.now)
 
         self.assertIn("Calibrated. Your 5-hour limit is about 1,000,000 tokens", message)
-        self.assertIn("5-hour usage   53%", text)
-        self.assertIn("Source       estimate from your calibration", text)
+        self.assertIn("█" * 11 + "░" * 9 + "  53% → 54% in under a minute", text)
+        self.assertIn("Source: estimate from your calibration", text)
         config = json.loads((self.home / ".claude" / "token-bar" / "config.json").read_text())
         self.assertEqual(config["five_hour"]["limit"], 1_000_000)
 
@@ -122,9 +122,9 @@ class UsageTests(unittest.TestCase):
 
         text = token_bar.build_report(self.home, self.now)
 
-        self.assertIn("5-hour usage   21%", text)
-        self.assertIn("Resets       in 2h 0m", text)
-        self.assertIn("Source       Claude Code, saved 0 min ago", text)
+        self.assertIn("5-hour  " + "█" * 4 + "░" * 16 + "  21%", text)
+        self.assertIn("resets in 2h 0m", text)
+        self.assertIn("Source: Claude Code, saved 0 min ago", text)
         self.assertIn("Live numbers: on", text)
 
     def test_readings_saved_by_the_command_line_tool_are_used_too(self):
@@ -137,8 +137,81 @@ class UsageTests(unittest.TestCase):
 
         text = token_bar.build_report(self.home, self.now)
 
-        self.assertIn("Weekly usage   78%", text)
+        self.assertIn("Weekly  ", text)
+        self.assertIn("78%", text)
         self.assertIn("Live numbers: on", text)
+
+    def save_readings(self, readings, resets):
+        """Saves (minutes_ago, percent) readings the way the status line would, oldest first."""
+        for minutes_ago, percent in readings:
+            when = self.now - timedelta(minutes=minutes_ago)
+            limits = {"five_hour": {"used_percentage": percent, "resets_at": int(resets.timestamp())}}
+            token_bar.save_statusline_payload(self.home, json.dumps({"rate_limits": limits}), when)
+
+    def test_next_point_comes_from_the_percent_history_with_no_calibration(self):
+        resets = self.now + timedelta(hours=3)
+        # The percent rose by 1 every 10 minutes and reached 23 two minutes ago.
+        self.save_readings([(32, 20.0), (22, 21.0), (12, 22.0), (2, 23.0)], resets)
+
+        text = token_bar.build_report(self.home, self.now)
+
+        self.assertIn("23% → 24% in ~8 min", text)
+
+    def test_next_point_works_with_fractional_percents(self):
+        resets = self.now + timedelta(hours=3)
+        self.save_readings([(24, 20.2), (4, 20.5)], resets)
+
+        text = token_bar.build_report(self.home, self.now)
+
+        # 0.3 points in 20 minutes, so 0.5 points remain: about 33 minutes, minus the 4 already passed.
+        self.assertIn("20% → 21% in ~29 min", text)
+
+    def test_says_when_the_percent_has_not_moved(self):
+        resets = self.now + timedelta(hours=3)
+        self.save_readings([(20, 22.0), (2, 22.0)], resets)
+
+        text = token_bar.build_report(self.home, self.now)
+
+        self.assertIn("22% · no recent activity", text)
+
+    def test_a_single_reading_shows_no_estimate_and_no_idle_message(self):
+        resets = self.now + timedelta(hours=3)
+        self.save_readings([(2, 22.0)], resets)
+
+        text = token_bar.build_report(self.home, self.now)
+
+        self.assertNotIn("→", text)
+        self.assertNotIn("no recent activity", text)
+
+    def test_an_old_reading_gives_no_estimate(self):
+        resets = self.now + timedelta(hours=3)
+        self.save_readings([(70, 20.0), (50, 22.0), (40, 23.0)], resets)
+
+        text = token_bar.build_report(self.home, self.now)
+
+        self.assertNotIn("→", text)
+
+    def test_unchanged_readings_within_a_minute_are_not_stored_twice(self):
+        resets = self.now + timedelta(hours=3)
+        self.save_readings([(5, 30.0), (5, 30.0)], resets)
+
+        history = json.loads(token_bar.history_path(self.home).read_text())
+
+        self.assertEqual(len(history), 1)
+
+    def test_old_history_is_dropped(self):
+        resets = self.now + timedelta(hours=3)
+        self.save_readings([(4 * 60, 10.0), (1, 30.0)], resets)
+
+        history = json.loads(token_bar.history_path(self.home).read_text())
+
+        self.assertEqual(len(history), 1)
+
+    def test_the_bar_fills_in_proportion(self):
+        self.assertEqual(token_bar.usage_bar(0), "░" * 20)
+        self.assertEqual(token_bar.usage_bar(100), "█" * 20)
+        self.assertEqual(token_bar.usage_bar(21), "█" * 4 + "░" * 16)
+        self.assertEqual(token_bar.usage_bar(150), "█" * 20)
 
 
 class StatuslineTests(unittest.TestCase):

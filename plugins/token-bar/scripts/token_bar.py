@@ -15,6 +15,11 @@ from pathlib import Path
 PACE_MINUTES = 30
 PROJECTS_DAYS = 7
 ROUGH_BELOW_PERCENT = 10
+BAR_WIDTH = 20
+FRESH_MINUTES = 30
+LOOKBACK_MINUTES = 60
+HISTORY_KEEP_SECONDS = 3 * 3600
+HISTORY_MAX_ENTRIES = 400
 
 # key -> label, window hours, key of Claude's own reading in rate_limits
 WINDOWS = {
@@ -36,6 +41,10 @@ def live_path(home):
     return data_dir(home) / "rate_limits.json"
 
 
+def history_path(home):
+    return data_dir(home) / "rate_history.json"
+
+
 def other_live_paths(home):
     """Where the token-bar command-line tool saves the same readings."""
     return [
@@ -51,6 +60,38 @@ def read_live(home):
         if saved:
             return saved
     return {}
+
+
+def append_history(home, rate_limits, now):
+    """Keeps a short history of Claude's percents, so the pace can be worked out from them."""
+    entry = {"t": int(now.timestamp())}
+    for key in ("five_hour", "seven_day"):
+        window = rate_limits.get(key) if isinstance(rate_limits, dict) else None
+        if isinstance(window, dict) and "used_percentage" in window and "resets_at" in window:
+            entry[key] = [float(window["used_percentage"]), int(window["resets_at"])]
+    if len(entry) == 1:
+        return
+
+    saved = read_json(history_path(home))
+    history = [e for e in saved if isinstance(e, dict)] if isinstance(saved, list) else []
+    history = [e for e in history if e.get("t", 0) >= entry["t"] - HISTORY_KEEP_SECONDS]
+    last = history[-1] if history else None
+    unchanged = last is not None and all(last.get(k) == entry.get(k) for k in ("five_hour", "seven_day"))
+    if unchanged and entry["t"] - last["t"] < 60:
+        return
+    history.append(entry)
+    write_json(history_path(home), history[-HISTORY_MAX_ENTRIES:])
+
+
+def window_series(home, key, resets_at):
+    """(time, percent) readings for one window, limited to the current reset period."""
+    saved = read_json(history_path(home))
+    series = []
+    for entry in saved if isinstance(saved, list) else []:
+        reading = entry.get(key) if isinstance(entry, dict) else None
+        if reading and int(reading[1]) == int(resets_at):
+            series.append((datetime.fromtimestamp(int(entry["t"]), timezone.utc), float(reading[0])))
+    return sorted(series)
 
 
 def read_json(path):
@@ -185,18 +226,55 @@ def format_age(seconds):
     return f"{minutes // (24 * 60)}d"
 
 
-def render_block(label, percent, nxt, minutes, resets_in, tokens_per_minute, source):
-    lines = [f"{label} usage   {math.floor(percent)}%"]
+def minutes_to_next_percent(series, now):
+    """Minutes until the percent next goes up, from how fast it moved in the last hour.
+
+    Returns None when the reading is old or the percent hasn't moved recently.
+    """
+    if len(series) < 2:
+        return None
+    latest_when, latest_percent = series[-1]
+    if now - latest_when > timedelta(minutes=FRESH_MINUTES):
+        return None
+    recent = [(when, percent) for when, percent in series if when >= latest_when - timedelta(minutes=LOOKBACK_MINUTES)]
+    first_when, first_percent = recent[0]
+    gained = latest_percent - first_percent
+    span = (latest_when - first_when).total_seconds() / 60
+    if gained <= 0 or span <= 0:
+        return None
+
+    rate = gained / span  # percent per minute
+    since_reading = (now - latest_when).total_seconds() / 60
+    if latest_percent == math.floor(latest_percent):
+        # Whole-number readings: the next point arrives one step after the last increase.
+        last_increase = next(when for when, percent in recent if percent == latest_percent)
+        return max(1 / rate - (now - last_increase).total_seconds() / 60, 0)
+    return max((math.floor(latest_percent) + 1 - latest_percent) / rate - since_reading, 0)
+
+
+def usage_bar(percent):
+    filled = max(0, min(BAR_WIDTH, round(percent / 100 * BAR_WIDTH)))
+    return "█" * filled + "░" * (BAR_WIDTH - filled)
+
+
+def estimate_text(minutes):
+    if minutes < 1:
+        return "under a minute"
+    return "~" + format_remaining(minutes * 60)
+
+
+def render_block(label, width, percent, nxt, minutes, idle, resets_in):
+    """One limit as a bar, with the next point on the same line and the reset time under it."""
+    head = f"{label:<{width + 2}}{usage_bar(percent)}  {math.floor(percent)}%"
     if percent >= 100:
-        lines.append("  Limit reached.")
+        head += "  limit reached"
     elif nxt is not None and minutes is not None:
-        lines.append(f"  Next point   {nxt}% in about {round(minutes)} min")
-    elif nxt is not None:
-        lines.append(f"  Next point   {nxt}%, no recent activity to estimate from")
+        head += f" → {nxt}% in {estimate_text(minutes)}"
+    elif idle:
+        head += " · no recent activity"
+    lines = [head]
     if resets_in is not None:
-        lines.append(f"  Resets       in {resets_in}")
-    lines.append(f"  Pace         {round(tokens_per_minute)} tokens per minute, last {PACE_MINUTES} min")
-    lines.append(f"  Source       {source}")
+        lines.append(f"{' ' * (width + 2)}resets in {resets_in}")
     return "\n".join(lines)
 
 
@@ -206,7 +284,7 @@ def build_report(home, now):
     readings = live.get("rate_limits") or {}
     records = None
 
-    blocks, missing = [], []
+    entries, sources, missing = [], {}, []
     for key, window in WINDOWS.items():
         setting = config.get(key)
         reading = readings.get(window["live"])
@@ -226,18 +304,28 @@ def build_report(home, now):
             percent = float(reading["used_percentage"])
             resets_at = datetime.fromtimestamp(int(reading["resets_at"]), timezone.utc)
             saved_at = datetime.fromtimestamp(int(live.get("saved_at", 0)), timezone.utc)
-            source = f"Claude Code, saved {format_age((now - saved_at).total_seconds())} ago"
+            sources[window["label"]] = f"Claude Code, saved {format_age((now - saved_at).total_seconds())} ago"
+            series = window_series(home, window["live"], reading["resets_at"])
+            nxt = math.floor(percent) + 1 if percent < 100 else None
+            minutes = minutes_to_next_percent(series, now)
+            if minutes is None and limit and percent < 100:
+                minutes = next_point(percent, limit, tokens_per_minute)[1]
+            fresh = now - saved_at <= timedelta(minutes=FRESH_MINUTES)
+            idle = minutes is None and fresh and len(series) >= 2 and percent < 100
         else:
             used = sum(tokens for when, tokens in records if start <= when <= now)
             percent = used / limit * 100
             resets_at = start + period if anchor else None
-            source = "estimate from your calibration"
+            sources[window["label"]] = "estimate from your calibration"
+            nxt, minutes = next_point(percent, limit, tokens_per_minute)
+            idle = nxt is not None and minutes is None
 
-        nxt, minutes = next_point(percent, limit, tokens_per_minute)
         resets_in = format_remaining((resets_at - now).total_seconds()) if resets_at else None
-        blocks.append(render_block(window["label"], percent, nxt, minutes, resets_in, tokens_per_minute, source))
+        entries.append((window["label"], percent, nxt, minutes, idle, resets_in))
 
     live_on = "on" if readings else "off"
+    width = max((len(entry[0]) for entry in entries), default=0)
+    blocks = [render_block(label, width, *rest) for label, *rest in entries]
     if not blocks:
         lines = ["Setup needed. Ask the user for each of these, then run calibrate:"]
         for key in missing:
@@ -247,6 +335,11 @@ def build_report(home, now):
         return "\n".join(lines)
 
     text = "\n\n".join(blocks)
+    distinct = set(sources.values())
+    if len(distinct) == 1:
+        text += f"\n\nSource: {distinct.pop()}"
+    else:
+        text += "\n\nSource: " + "; ".join(f"{name}: {how}" for name, how in sources.items())
     if missing:
         names = ", ".join(WINDOWS[key]["label"] for key in missing)
         text += f"\n\nNot set up yet: {names}. Ask the user for its percent and reset time to add it."
@@ -290,6 +383,7 @@ def save_statusline_payload(home, payload_text, now):
     if rate_limits:
         try:
             write_json(live_path(home), {"rate_limits": rate_limits, "saved_at": int(now.timestamp())})
+            append_history(home, rate_limits, now)
         except OSError as error:
             print(f"token-bar: could not save readings: {error}", file=sys.stderr)
 
@@ -360,6 +454,8 @@ def main(argv, home, stdin_text=None, script_path=None):
 
 
 if __name__ == "__main__":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")  # the bars need UTF-8, which some Windows consoles lack
     output, code = main(sys.argv[1:], Path.home())
     print(output)
     sys.exit(code)

@@ -34,14 +34,13 @@ The first time, it asks one question: do you want live numbers?
 
 It only changes the one status line setting, and it never replaces a status line you already have.
 
-Each limit prints like this, with the values filled in from your own usage:
+Each limit prints as a bar, with the values filled in from your own usage:
 
 ```
-<window> usage   <percent>%
-  Next point   <next percent>% in about <minutes> min
-  Resets       in <time>
-  Pace         <tokens> tokens per minute, last 30 min
-  Source       <where the number came from>
+<window>  <bar>  <percent>% → <next percent>% in ~<minutes>
+          resets in <time>
+
+Source: <where the numbers came from>
 ```
 
 ### Codex
@@ -55,11 +54,7 @@ codex plugin add token-bar@token-bar
 
 Then ask Codex: **show my Codex usage limits**.
 
-![A real answer from Codex with token-bar installed: monthly usage 4%, next point 5% in under a minute, resets in 29d 23h](assets/codex-answer.png)
-
-*A real answer from Codex with the plugin installed.*
-
-There is nothing to set up. Codex already writes your limits into its own session logs, and token-bar reads them. The answer shows each window's percent, an estimate of when it next goes up, when it resets, and how old the reading is.
+There is nothing to set up. Codex already writes your limits into its own session logs, and token-bar reads them. The answer shows each window as a bar with its percent, an estimate of when it next goes up, when it resets, and how old the reading is.
 
 ## Supported tools
 

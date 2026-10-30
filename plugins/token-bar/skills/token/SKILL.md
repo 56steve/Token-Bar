@@ -11,7 +11,7 @@ The script is at `${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py`. Run it as:
 
     python3 "${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py" status
 
-1. Run `status` and show its output exactly as printed. Don't add numbers of your own.
+1. Run `status` and show its output inside a code block, exactly as printed. The bars only line up in a code block. Don't add numbers of your own.
 
 2. If the output ends with `Live numbers: off`, offer live numbers first. This is the best way to get accurate numbers, because Claude reports them itself and the user types nothing. Ask once:
 

@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 MAX_FILES = 25
+BAR_WIDTH = 20
 LOOKBACK_MINUTES = 60
 FRESH_MINUTES = 30
 WINDOWS = ("primary", "secondary")
@@ -115,13 +116,30 @@ def format_remaining(seconds):
     return f"{mins} min"
 
 
-def next_point_line(percent, eta):
-    next_percent = math.floor(percent) + 1
-    if eta is None:
-        return f"  Next point   {next_percent}%, no recent activity to estimate from"
-    if eta < 1:
-        return f"  Next point   {next_percent}% in under a minute"
-    return f"  Next point   {next_percent}% in about {round(eta)} min"
+def usage_bar(percent):
+    filled = max(0, min(BAR_WIDTH, round(percent / 100 * BAR_WIDTH)))
+    return "█" * filled + "░" * (BAR_WIDTH - filled)
+
+
+def estimate_text(minutes):
+    if minutes < 1:
+        return "under a minute"
+    return "~" + format_remaining(minutes * 60)
+
+
+def render_block(width, label, percent, eta, idle, expired, resets_time, now):
+    """One window as a bar, with the next point on the same line and the reset time under it."""
+    head = f"{label:<{width + 2}}{usage_bar(percent)}  {math.floor(percent)}%"
+    if percent >= 100:
+        head += "  limit reached"
+    elif eta is not None:
+        head += f" → {math.floor(percent) + 1}% in {estimate_text(eta)}"
+    elif idle:
+        head += " · no recent activity"
+    pad = " " * (width + 2)
+    if expired:
+        return head + f"\n{pad}reset since this reading, so your real usage is probably lower now"
+    return head + f"\n{pad}resets in {format_remaining((resets_time - now).total_seconds())}"
 
 
 def render(readings, now):
@@ -129,7 +147,7 @@ def render(readings, now):
     age = format_remaining((now - latest_when).total_seconds())
     fresh = now - latest_when <= timedelta(minutes=FRESH_MINUTES)
 
-    blocks = []
+    rows = []
     for key in WINDOWS:
         window = latest_limits.get(key)
         if not window:
@@ -137,15 +155,16 @@ def render(readings, now):
         percent = float(window["used_percent"])
         resets_at = int(window["resets_at"])
         resets_time = datetime.fromtimestamp(resets_at, timezone.utc)
-        lines = [f"{window_label(int(window['window_minutes']))} usage   {math.floor(percent)}%"]
-        if resets_time > now:
-            if fresh and percent < 100:
-                eta = minutes_to_next_percent(window_series(readings, key, resets_at), now)
-                lines.append(next_point_line(percent, eta))
-            lines.append(f"  Resets       in {format_remaining((resets_time - now).total_seconds())}")
-        else:
-            lines.append("  Reset since this reading, so your real usage is probably lower now.")
-        blocks.append("\n".join(lines))
+        expired = resets_time <= now
+        eta, idle = None, False
+        if not expired and fresh and percent < 100:
+            series = window_series(readings, key, resets_at)
+            eta = minutes_to_next_percent(series, now)
+            idle = eta is None and len(series) >= 2
+        rows.append((window_label(int(window["window_minutes"])), percent, eta, idle, expired, resets_time))
+
+    width = max(len(row[0]) for row in rows)
+    blocks = [render_block(width, *row, now) for row in rows]
 
     footer = f"Source: Codex session log, saved {age} ago"
     plan = latest_limits.get("plan_type")
@@ -163,5 +182,7 @@ def main(home, now=None):
 
 
 if __name__ == "__main__":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")  # the bars need UTF-8, which some Windows consoles lack
     print(main(Path.home()))
     sys.exit(0)

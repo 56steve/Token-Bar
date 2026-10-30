@@ -56,9 +56,9 @@ class CodexUsageTests(unittest.TestCase):
 
         text = codex_usage.main(self.home, self.now)
 
-        self.assertIn("5-hour usage   21%", text)
-        self.assertIn("Weekly usage   78%", text)
-        self.assertIn("Resets       in 2d 16h", text)
+        self.assertIn("5-hour  " + "█" * 4 + "░" * 16 + "  21%", text)
+        self.assertIn("Weekly  " + "█" * 16 + "░" * 4 + "  78%", text)
+        self.assertIn("resets in 2d 16h", text)
         self.assertIn("Source: Codex session log, saved 5 min ago. Plan: plus.", text)
 
     def test_uses_the_newest_reading_in_a_session_file(self):
@@ -71,7 +71,7 @@ class CodexUsageTests(unittest.TestCase):
 
         text = codex_usage.main(self.home, self.now)
 
-        self.assertIn("5-hour usage   40%", text)
+        self.assertIn("█" * 8 + "░" * 12 + "  40%", text)
 
     def test_ignores_lines_that_are_not_token_counts_or_have_no_windows(self):
         self.write_session("rollout-a.jsonl", [
@@ -93,7 +93,7 @@ class CodexUsageTests(unittest.TestCase):
 
         text = codex_usage.main(self.home, self.now)
 
-        self.assertIn("5-hour usage   33%", text)
+        self.assertIn("█" * 7 + "░" * 13 + "  33%", text)
         self.assertIn("saved 30 min ago", text)
 
     def test_says_when_a_window_has_reset_since_the_reading(self):
@@ -102,7 +102,7 @@ class CodexUsageTests(unittest.TestCase):
 
         text = codex_usage.main(self.home, self.now)
 
-        self.assertIn("Reset since this reading", text)
+        self.assertIn("reset since this reading", text)
 
     def test_estimates_the_next_point_from_whole_number_readings(self):
         resets = self.now + timedelta(hours=3)
@@ -114,7 +114,7 @@ class CodexUsageTests(unittest.TestCase):
 
         text = codex_usage.main(self.home, self.now)
 
-        self.assertIn("Next point   24% in about 8 min", text)
+        self.assertIn("23% → 24% in ~8 min", text)
 
     def test_estimates_the_next_point_from_fractional_readings(self):
         resets = self.now + timedelta(hours=3)
@@ -126,7 +126,7 @@ class CodexUsageTests(unittest.TestCase):
         text = codex_usage.main(self.home, self.now)
 
         # 0.3 points in 20 minutes, so 0.5 points remain: about 33 minutes, minus the 4 already passed.
-        self.assertIn("Next point   21% in about 29 min", text)
+        self.assertIn("20% → 21% in ~29 min", text)
 
     def test_says_so_when_the_percent_has_not_moved(self):
         resets = self.now + timedelta(hours=3)
@@ -137,7 +137,7 @@ class CodexUsageTests(unittest.TestCase):
 
         text = codex_usage.main(self.home, self.now)
 
-        self.assertIn("Next point   23%, no recent activity to estimate from", text)
+        self.assertIn("22% · no recent activity", text)
 
     def test_gives_no_estimate_from_an_old_reading(self):
         resets = self.now + timedelta(hours=3)
@@ -148,7 +148,8 @@ class CodexUsageTests(unittest.TestCase):
 
         text = codex_usage.main(self.home, self.now)
 
-        self.assertNotIn("Next point", text)
+        self.assertNotIn("→", text)
+        self.assertNotIn("no recent activity", text)
 
     def test_readings_from_an_earlier_reset_period_are_not_mixed_in(self):
         old_reset = self.now - timedelta(hours=1)
@@ -160,8 +161,9 @@ class CodexUsageTests(unittest.TestCase):
 
         text = codex_usage.main(self.home, self.now)
 
-        self.assertIn("5-hour usage   2%", text)
-        self.assertIn("Next point   3%, no recent activity to estimate from", text)
+        self.assertIn("░" * 20 + "  2%", text)
+        self.assertNotIn("→", text)
+        self.assertNotIn("95%", text)
 
     def test_no_sessions_gives_a_clear_message(self):
         empty_home = self.home / "empty"

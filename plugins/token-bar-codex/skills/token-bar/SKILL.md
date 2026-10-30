@@ -13,7 +13,7 @@ Show the user their Codex usage limits. Codex records its own rate limits in its
 
    If that path doesn't exist, find the script with `find ~/.codex ~/.agents -name codex_usage.py` and run it with `python3`.
 
-2. Show its output exactly as printed. Don't add numbers of your own.
+2. Show its output inside a code block, exactly as printed. The bars only line up in a code block. Don't add numbers of your own.
 
 3. If the output says a window has reset since the reading, tell the user the reading is old and that their usage is probably lower now. Using Codex once will refresh it.
 
