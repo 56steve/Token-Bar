@@ -56,7 +56,7 @@ Then ask Codex something like "show my Codex usage limits". There's nothing to s
 
 The reading is from your last Codex session, so it shows how old it is. If a limit window has reset since then, token-bar says so.
 
-> **Status:** the Codex reader is tested on real Codex logs. The plugin files follow the format of plugins already installed in Codex. The two install commands above follow Codex's documented pattern but haven't been run end to end yet. If one fails, open an issue.
+> **Status:** tested with Codex 0.164. Both install commands work from GitHub, the plugin installs and enables, and the reader runs on real Codex logs. Not yet checked: Codex choosing to run the skill when asked in a chat. If it doesn't, open an issue.
 
 ## How it works
 
