@@ -56,7 +56,7 @@ Then ask Codex something like "show my Codex usage limits". There's nothing to s
 
 The reading is from your last Codex session, so it shows how old it is. If a limit window has reset since then, token-bar says so.
 
-> **Status:** tested with Codex 0.164. Both install commands work from GitHub, the plugin installs and enables, and the reader runs on real Codex logs. Not yet checked: Codex choosing to run the skill when asked in a chat. If it doesn't, open an issue.
+> **Status:** tested in the Codex built into the ChatGPT app (Codex 0.164). Both install commands work from GitHub, the plugin installs and enables, and when asked "show my Codex usage limits", Codex runs the skill and shows your real limits. If it doesn't for you, open an issue.
 
 ## How it works
 
