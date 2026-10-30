@@ -1,0 +1,31 @@
+{
+  "name": "token-bar",
+  "version": "0.1.0",
+  "description": "See your Codex usage limits and when they reset, read from Codex's own session logs. Runs locally.",
+  "author": {
+    "name": "Steve"
+  },
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "usage",
+    "rate-limit",
+    "limits"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "token-bar",
+    "shortDescription": "See your Codex usage limits",
+    "longDescription": "Shows your Codex usage against its limits and when each window resets. It reads the rate limits Codex already records in its own session logs, so there is nothing to set up. Everything stays on your machine.",
+    "developerName": "Steve",
+    "category": "Productivity",
+    "capabilities": [
+      "Read"
+    ],
+    "defaultPrompt": [
+      "Show my Codex usage limits"
+    ],
+    "brandColor": "#10A37F",
+    "screenshots": []
+  }
+}
