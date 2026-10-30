@@ -25,7 +25,7 @@ Run these two commands inside Claude Code:
 /plugin install token-bar --marketplace 56steve/Token-Bar
 ```
 
-Then run `/token-bar:token`.
+Then run `/token-bar:token`. Claude Code always puts a plugin's name in front of its commands, so that's the full name. After your first numbers, token-bar offers to add a short `/token` for you. Say yes, and it adds one small skill to your own skills folder that hands off to the plugin. It never replaces a `/token` skill you wrote yourself, and it keeps working after plugin updates.
 
 The first time, it asks one question: do you want live numbers?
 
