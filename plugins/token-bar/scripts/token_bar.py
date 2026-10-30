@@ -36,6 +36,23 @@ def live_path(home):
     return data_dir(home) / "rate_limits.json"
 
 
+def other_live_paths(home):
+    """Where the token-bar command-line tool saves the same readings."""
+    return [
+        home / "Library" / "Application Support" / "token-bar" / "rate_limits.json",
+        home / ".config" / "token-bar" / "rate_limits.json",
+    ]
+
+
+def read_live(home):
+    """Claude's saved readings, from the plugin's file or the command-line tool's file."""
+    for path in [live_path(home), *other_live_paths(home)]:
+        saved = read_json(path)
+        if saved:
+            return saved
+    return {}
+
+
 def read_json(path):
     """Returns the parsed file, or None when it is missing or unreadable."""
     try:
@@ -185,7 +202,7 @@ def render_block(label, percent, nxt, minutes, resets_in, tokens_per_minute, sou
 
 def build_report(home, now):
     config = read_json(config_path(home)) or {}
-    live = (read_json(live_path(home)) or {})
+    live = read_live(home)
     readings = live.get("rate_limits") or {}
     records = None
 
@@ -325,11 +342,16 @@ def main(argv, home, stdin_text=None, script_path=None):
             text = stdin_text if stdin_text is not None else sys.stdin.read()
             return save_statusline_payload(home, text, now), 0
         if args.command == "enable-statusline":
-            result, code = enable_statusline(home, script_path or Path(__file__).resolve())
+            script = script_path or Path(__file__).resolve()
+            result, code = enable_statusline(home, script)
             messages = {
-                "set": "Status line set. Send one message in Claude Code, then run /token.",
+                "set": "Status line set. Run /token-bar:token once more to see your live numbers.",
                 "already": "The status line was already set up.",
-                "kept": "You already have a different status line, so it was left as it is.",
+                "kept": (
+                    "You already have a different status line, so it was left as it is.\n"
+                    "To get live numbers too, add this line to your status line script, after it reads its input:\n"
+                    f'  printf \'%s\' "$input" | python3 "{script}" statusline > /dev/null'
+                ),
             }
             return messages[result], code
     except ValueError as error:

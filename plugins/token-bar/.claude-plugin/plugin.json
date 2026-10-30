@@ -1,7 +1,7 @@
 {
   "name": "token-bar",
   "description": "See how close you are to your Claude 5-hour and weekly usage limits, and when the next whole percent lands. Runs locally.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "author": {
     "name": "Steve",
     "email": "stevejason639@gmail.com"

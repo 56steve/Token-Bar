@@ -127,6 +127,19 @@ class UsageTests(unittest.TestCase):
         self.assertIn("Source       Claude Code, saved 0 min ago", text)
         self.assertIn("Live numbers: on", text)
 
+    def test_readings_saved_by_the_command_line_tool_are_used_too(self):
+        reset = int((self.now + timedelta(hours=3)).timestamp())
+        cli_file = token_bar.other_live_paths(self.home)[0]
+        token_bar.write_json(cli_file, {
+            "rate_limits": {"seven_day": {"used_percentage": 78.2, "resets_at": reset}},
+            "saved_at": int(self.now.timestamp()),
+        })
+
+        text = token_bar.build_report(self.home, self.now)
+
+        self.assertIn("Weekly usage   78%", text)
+        self.assertIn("Live numbers: on", text)
+
 
 class StatuslineTests(unittest.TestCase):
     def setUp(self):
@@ -171,6 +184,16 @@ class StatuslineTests(unittest.TestCase):
 
         self.assertEqual((result, code), ("kept", 3))
         self.assertEqual(json.loads(settings.read_text())["statusLine"]["command"], "bash mine.sh")
+
+    def test_a_kept_status_line_comes_with_the_line_to_add(self):
+        settings = self.home / ".claude" / "settings.json"
+        token_bar.write_json(settings, {"statusLine": {"type": "command", "command": "bash mine.sh"}})
+
+        text, code = token_bar.main(["enable-statusline"], self.home, script_path=Path("/opt/token_bar.py"))
+
+        self.assertEqual(code, 3)
+        self.assertIn("left as it is", text)
+        self.assertIn('python3 "/opt/token_bar.py" statusline', text)
 
 
 if __name__ == "__main__":
