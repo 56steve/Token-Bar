@@ -1,6 +1,6 @@
 {
   "name": "token-bar",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "See your Codex usage limits and when they reset, read from Codex's own session logs. Runs locally.",
   "author": {
     "name": "Steve"

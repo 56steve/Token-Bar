@@ -54,7 +54,7 @@ codex plugin add token-bar@token-bar
 
 Then ask Codex something like "show my Codex usage limits". There's nothing to set up, because Codex already writes your rate limits into its own session logs under `~/.codex/sessions/`, and token-bar reads them.
 
-The reading is from your last Codex session, so it shows how old it is. If a limit window has reset since then, token-bar says so.
+It also estimates when your percent next goes up, based on how fast it has moved in the last hour. Codex reports whole percents, so treat that estimate as approximate. The reading is from your last Codex session, so it shows how old it is, and it skips the estimate when the reading is old. If a limit window has reset since then, token-bar says so.
 
 > **Status:** tested in the Codex built into the ChatGPT app (Codex 0.164). Both install commands work from GitHub, the plugin installs and enables, and when asked "show my Codex usage limits", Codex runs the skill and shows your real limits. If it doesn't for you, open an issue.
 

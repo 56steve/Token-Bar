@@ -104,6 +104,65 @@ class CodexUsageTests(unittest.TestCase):
 
         self.assertIn("Reset since this reading", text)
 
+    def test_estimates_the_next_point_from_whole_number_readings(self):
+        resets = self.now + timedelta(hours=3)
+        # The percent rose by 1 every 10 minutes and reached 23 two minutes ago.
+        self.write_session("rollout-a.jsonl", [
+            token_count_line(self.now - timedelta(minutes=minutes), window(percent, 300, resets))
+            for minutes, percent in [(32, 20.0), (22, 21.0), (12, 22.0), (2, 23.0)]
+        ])
+
+        text = codex_usage.main(self.home, self.now)
+
+        self.assertIn("Next point   24% in about 8 min", text)
+
+    def test_estimates_the_next_point_from_fractional_readings(self):
+        resets = self.now + timedelta(hours=3)
+        self.write_session("rollout-a.jsonl", [
+            token_count_line(self.now - timedelta(minutes=24), window(20.2, 300, resets)),
+            token_count_line(self.now - timedelta(minutes=4), window(20.5, 300, resets)),
+        ])
+
+        text = codex_usage.main(self.home, self.now)
+
+        # 0.3 points in 20 minutes, so 0.5 points remain: about 33 minutes, minus the 4 already passed.
+        self.assertIn("Next point   21% in about 29 min", text)
+
+    def test_says_so_when_the_percent_has_not_moved(self):
+        resets = self.now + timedelta(hours=3)
+        self.write_session("rollout-a.jsonl", [
+            token_count_line(self.now - timedelta(minutes=20), window(22.0, 300, resets)),
+            token_count_line(self.now - timedelta(minutes=2), window(22.0, 300, resets)),
+        ])
+
+        text = codex_usage.main(self.home, self.now)
+
+        self.assertIn("Next point   23%, no recent activity to estimate from", text)
+
+    def test_gives_no_estimate_from_an_old_reading(self):
+        resets = self.now + timedelta(hours=3)
+        self.write_session("rollout-a.jsonl", [
+            token_count_line(self.now - timedelta(minutes=minutes), window(percent, 300, resets))
+            for minutes, percent in [(70, 20.0), (50, 22.0), (40, 23.0)]
+        ])
+
+        text = codex_usage.main(self.home, self.now)
+
+        self.assertNotIn("Next point", text)
+
+    def test_readings_from_an_earlier_reset_period_are_not_mixed_in(self):
+        old_reset = self.now - timedelta(hours=1)
+        new_reset = self.now + timedelta(hours=4)
+        self.write_session("rollout-a.jsonl", [
+            token_count_line(self.now - timedelta(minutes=30), window(95.0, 300, old_reset)),
+            token_count_line(self.now - timedelta(minutes=2), window(2.0, 300, new_reset)),
+        ])
+
+        text = codex_usage.main(self.home, self.now)
+
+        self.assertIn("5-hour usage   2%", text)
+        self.assertIn("Next point   3%, no recent activity to estimate from", text)
+
     def test_no_sessions_gives_a_clear_message(self):
         empty_home = self.home / "empty"
         empty_home.mkdir()
