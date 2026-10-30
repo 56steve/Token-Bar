@@ -1,10 +1,41 @@
-# token-bar
+<p align="center">
+  <img src="assets/hero.svg" alt="token-bar shows 5-hour usage at 21% and weekly usage at 78%, with time to the next percent and time to reset (example numbers)" width="760">
+</p>
 
-**See how close you are to your AI coding usage limits, right inside your coding agent.**
+<h1 align="center">token-bar</h1>
 
-Works with **Claude Code** and **Codex**. Ask for your usage and see where you stand and when each limit resets. Your numbers stay on your machine.
+<p align="center"><b>Know how close you are to your AI coding limit, before it stops your work.</b></p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-3ddc97"></a>
+  <img alt="Claude Code plugin" src="https://img.shields.io/badge/Claude%20Code-plugin-d97757">
+  <img alt="Codex plugin" src="https://img.shields.io/badge/Codex-plugin-10a37f">
+  <img alt="Local and private" src="https://img.shields.io/badge/runs-100%25%20local-5b6275">
+  <a href="https://github.com/56steve/Token-Bar/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/56steve/Token-Bar?style=flat&color=f5a524"></a>
+</p>
+
+---
+
+## The problem
+
+You're deep in a task. Claude Code or Codex is mid-edit. Then a usage limit hits and the work stops. The meter that would have warned you is buried in a settings page you never open.
+
+**token-bar puts that meter where you already are.** Ask your coding agent for your usage, and it tells you how far along you are, how fast you're going, and when the limit resets.
+
+## What you get
+
+- **Where you stand.** Your usage as a percent, for each limit window.
+- **When the next point lands.** An estimate of how long until your usage ticks up to the next percent, based on how fast you've been working.
+- **When it resets.** A countdown to the next reset.
+- **Zero cloud.** It reads files already on your machine. No account, no network calls, nothing sent anywhere.
+
+## See it
+
+**Claude Code**
 
 ```
+> /token-bar:token
+
 5-hour usage   21%
   Next point   22% in about 23 min
   Resets       in 1h 1m
@@ -14,71 +45,115 @@ Weekly usage   78%
   Resets       in 2d 16h
 ```
 
-## Supported tools
+**Codex**
 
-| Tool | Status | How it gets your numbers |
-| :- | :- | :- |
-| **Claude Code** | Supported | Claude's own percentages through the status line, or an estimate from your session logs |
-| **Codex** | Supported | The limits Codex already records in its session logs. Nothing to set up |
-| Gemini CLI | Not yet | Its local files don't show usage limits, so there's nothing to read |
-| Cursor | Not yet | Its local files don't show usage limits, so there's nothing to read |
+```
+> show my Codex usage limits
 
-More tools will be added when they expose their limits in a way token-bar can read. Pull requests are welcome.
+Monthly usage   3%
+  Next point   4% in about 6 min
+  Resets       in 29d 23h
 
-## Claude Code
+Source: Codex session log, saved 2 min ago. Plan: go.
+```
 
-Inside Claude Code, run these two commands:
+*Numbers above are examples.*
+
+## Install
+
+<details open>
+<summary><b>Claude Code</b> (two commands, inside Claude Code)</summary>
+
+<br>
 
 ```
 /plugin marketplace add 56steve/Token-Bar
 /plugin install token-bar --marketplace 56steve/Token-Bar
 ```
 
-Nothing to download, nothing to build, and no account to create. Then run `/token-bar:token`.
+Then run `/token-bar:token`.
 
-The first time, it asks one question: **do you want live numbers?**
+The first time, it asks one question: **do you want live numbers?** Say yes, and it adds a status line to your Claude settings so Claude reports your real percentages to token-bar. After that you never type a number. Say no, and it asks for the percent Claude shows you once, then estimates from there.
 
-- **Yes (recommended).** It adds a status line to your Claude settings. Claude reports your real 5-hour and weekly percentages to it, so you never type a number. Run `/token-bar:token` once more and it shows your live usage.
-- **No.** It asks for the percentage Claude shows for each window, and when it resets, in chat. After that, it estimates your usage.
+It only changes the one status line setting, and it never replaces a status line you already have.
 
-It only changes the one status line setting, and it never replaces a status line you already have. Claude Code only gives your real percentages to the status line, and a plugin can't turn that on by itself, so token-bar asks first.
+</details>
 
-## Codex
+<details open>
+<summary><b>Codex</b> (two commands, nothing to set up)</summary>
 
-Add the marketplace from this repo, then install the plugin:
+<br>
 
 ```bash
 codex plugin marketplace add 56steve/Token-Bar
 codex plugin add token-bar@token-bar
 ```
 
-Then ask Codex something like "show my Codex usage limits". There's nothing to set up, because Codex already writes your rate limits into its own session logs under `~/.codex/sessions/`, and token-bar reads them.
+Then ask Codex: **"show my Codex usage limits"**.
 
-It also estimates when your percent next goes up, based on how fast it has moved in the last hour. Codex reports whole percents, so treat that estimate as approximate. The reading is from your last Codex session, so it shows how old it is, and it skips the estimate when the reading is old. If a limit window has reset since then, token-bar says so.
+Codex already writes your limits into its own session logs, so token-bar just reads them.
 
-> **Status:** tested in the Codex built into the ChatGPT app (Codex 0.164). Both install commands work from GitHub, the plugin installs and enables, and when asked "show my Codex usage limits", Codex runs the skill and shows your real limits. If it doesn't for you, open an issue.
+</details>
 
-## How it works
+## Works with
 
-- **Claude Code** writes a local log of your messages. token-bar reads those logs to count your tokens, counting each request once even when Claude streams it in several pieces. Your limits reset on fixed schedules, so it counts each window from its last reset. With the live status line on, it uses Claude's own percentages instead of an estimate.
-- **Codex** writes your rate limits into its session logs. token-bar reads the newest reading.
+| Tool | Status | Where the numbers come from |
+| :- | :- | :- |
+| **Claude Code** | Supported | Claude's own percentages through the status line, or an estimate from your session logs |
+| **Codex** | Supported | The limits Codex records in its own session logs |
+| Gemini CLI | Not yet | Its files record tokens but not your limit, so any number would be a guess |
+| Cursor | Not yet | Its usage lives on Cursor's servers, not on your machine |
 
-## Privacy
+Want your tool here? The recipe is small: find where it records usage, and read it. See [Contributing](#contributing).
 
-- Everything runs locally. token-bar makes no network calls and has no account.
-- It reads only each tool's own local session files, and its own settings in `~/.claude/token-bar/`. It never sends them anywhere.
-- It only edits your Claude settings when you say yes, and it never replaces a status line you already have.
+## Good to know
 
-## What to expect
+- **Live Claude numbers need a Claude.ai Pro or Max account.** Claude only reports your limits to the status line on those accounts. API-key users get the estimate instead.
+- **Readings update while you use the tool.** token-bar shows how old each reading is, and it skips the next-point estimate when a reading is old.
+- **Codex reports whole percents,** so its next-point estimate is approximate.
+- **Needs Python 3.** macOS includes it. Windows users may need to install it first.
 
-- **Live Claude numbers need a Claude.ai Pro or Max account.** The status line only receives Claude's limits on those accounts. API-key users use the estimate instead.
-- **Readings update while the tool is in use.** token-bar shows how old each reading is.
-- **The Claude estimate is only as good as your last reading.** Calibrate again if it drifts from Claude's meter.
-- **Requires Python 3.** macOS includes it. Windows users may need to install it first.
+## FAQ
+
+<details>
+<summary><b>Is it safe? Where does my data go?</b></summary>
+
+<br>
+
+Nowhere. token-bar makes no network calls and has no account. It reads each tool's own local session files and writes only its own small settings file. The code is short and open, so you can read all of it.
+
+</details>
+
+<details>
+<summary><b>Why does Claude Code ask me to say yes once?</b></summary>
+
+<br>
+
+Claude Code only hands your real limits to the status line, and a plugin can't turn the status line on by itself. It has to live in your own settings, so token-bar asks before changing them. It won't replace a status line you already have.
+
+</details>
+
+<details>
+<summary><b>I already have a status line. Can I still get live numbers?</b></summary>
+
+<br>
+
+Yes. token-bar leaves yours alone and prints one line you can add to your own status line script. That line passes the same data to token-bar.
+
+</details>
+
+<details>
+<summary><b>How accurate is it?</b></summary>
+
+<br>
+
+With live numbers on (Claude) or on Codex, the percents are the ones the tools themselves report. The next-point and reset times come from those numbers and your recent pace, so treat them as estimates. Without live numbers, the Claude estimate depends on the last percent you gave it.
+
+</details>
 
 ## Terminal version
 
-This repo also has a Rust command-line tool, `token-bar`, for people who want the Claude numbers in a terminal:
+This repo also has a Rust command-line tool for the Claude numbers, for people who prefer a terminal:
 
 ```bash
 cargo install --git https://github.com/56steve/Token-Bar token-bar
@@ -91,7 +166,7 @@ token-bar is an independent open-source project. It is not made by, endorsed by,
 
 ## Contributing
 
-Issues and pull requests are welcome, especially readers for other tools. The logic lives in:
+Issues and pull requests are welcome, especially readers for other tools. Each tool is one small Python file that finds the tool's usage records and prints them:
 
 - [`plugins/token-bar/scripts/token_bar.py`](plugins/token-bar/scripts/token_bar.py) for Claude Code
 - [`plugins/token-bar-codex/skills/token-bar/scripts/codex_usage.py`](plugins/token-bar-codex/skills/token-bar/scripts/codex_usage.py) for Codex
