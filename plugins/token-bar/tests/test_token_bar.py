@@ -20,6 +20,17 @@ def request_line(request_id, when, input_tokens, output_tokens=0):
     })
 
 
+def request_entry(request_id, when, tokens, cwd, model="claude-sonnet-5-5", subagent=False):
+    return json.dumps({
+        "type": "assistant",
+        "timestamp": when.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+        "requestId": request_id,
+        "cwd": cwd,
+        "isSidechain": subagent,
+        "message": {"model": model, "usage": {"input_tokens": tokens, "output_tokens": 0}},
+    })
+
+
 class WindowTests(unittest.TestCase):
     def test_window_starts_at_the_last_fixed_reset(self):
         anchor = datetime(2026, 10, 29, 14, 20, tzinfo=timezone.utc)
@@ -208,6 +219,108 @@ class UsageTests(unittest.TestCase):
 
         self.assertEqual(len(history), 1)
 
+    def test_projection_says_when_the_pace_hits_the_limit_before_the_reset(self):
+        text = token_bar.projection_text(70, 0.5, 100)
+
+        self.assertEqual(text, "at this pace you'd hit 100% in ~1h 0m, about 40 min before the reset")
+
+    def test_projection_says_where_the_pace_ends_up_when_it_makes_the_reset(self):
+        self.assertEqual(token_bar.projection_text(40, 0.1, 120), "at this pace you'll reach ~52% by the reset")
+
+    def test_projection_is_skipped_for_long_windows_and_missing_data(self):
+        self.assertIsNone(token_bar.projection_text(40, 0.1, 3000))
+        self.assertIsNone(token_bar.projection_text(40, None, 120))
+        self.assertIsNone(token_bar.projection_text(100, 0.1, 120))
+        self.assertIsNone(token_bar.projection_text(40, 0.1, None))
+
+    def test_the_report_shows_the_projection_from_the_percent_history(self):
+        resets = self.now + timedelta(hours=3)
+        self.save_readings([(32, 20.0), (22, 21.0), (12, 22.0), (2, 23.0)], resets)
+
+        text = token_bar.build_report(self.home, self.now)
+
+        self.assertIn("at this pace you'll reach ~41% by the reset", text)
+
+    def test_the_report_has_no_projection_without_a_pace(self):
+        resets = self.now + timedelta(hours=3)
+        self.save_readings([(2, 22.0)], resets)
+
+        self.assertNotIn("at this pace", token_bar.build_report(self.home, self.now))
+
+    def write_requests(self, entries):
+        (self.projects / "session.jsonl").write_text("\n".join(entries))
+
+    def test_breakdown_shares_by_project_model_and_subagent(self):
+        when = self.now - timedelta(minutes=10)
+        self.write_requests([
+            request_entry("r1", when, 600, "/work/alpha"),
+            request_entry("r2", when, 300, "/work/beta", model="claude-haiku-5-5", subagent=True),
+            request_entry("r3", when, 100, "/work/alpha"),
+        ])
+        requests = token_bar.scan_requests(self.home / ".claude" / "projects", self.now - timedelta(hours=1))
+
+        text = token_bar.breakdown_text(requests, "5-hour")
+
+        self.assertIn("1k tokens counted", text)
+        self.assertRegex(text, r"alpha\s+█+░*\s+70%")
+        self.assertRegex(text, r"beta\s+█+░*\s+30%")
+        self.assertRegex(text, r"Sonnet 5\.5\s+█+░*\s+70%")
+        self.assertRegex(text, r"Haiku 5\.5\s+█+░*\s+30%")
+        self.assertRegex(text, r"Subagents\s+█+░*\s+30%")
+        self.assertIn("not exact shares of your limit", text)
+
+    def test_breakdown_counts_a_streamed_request_once(self):
+        when = self.now - timedelta(minutes=10)
+        self.write_requests([request_entry("r1", when, 500, "/work/alpha")] * 3)
+        requests = token_bar.scan_requests(self.home / ".claude" / "projects", self.now - timedelta(hours=1))
+
+        self.assertEqual(sum(r["tokens"] for r in requests), 500)
+
+    def test_breakdown_command_says_so_when_there_is_no_usage(self):
+        text, code = token_bar.main(["breakdown"], self.home)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(text, "No Claude Code usage in the current 5-hour window yet.")
+
+    def test_breakdown_command_reads_the_projects_folder(self):
+        self.write_requests([request_entry("r1", datetime.now(timezone.utc) - timedelta(minutes=5), 900, "/work/alpha")])
+
+        text, _ = token_bar.main(["breakdown"], self.home)
+
+        self.assertIn("Where your tokens went in the current 5-hour window", text)
+        self.assertIn("alpha", text)
+
+    def test_the_window_starts_at_claudes_reset_minus_its_length(self):
+        reset = self.now + timedelta(hours=2)
+        token_bar.write_json(token_bar.live_path(self.home), {
+            "rate_limits": {"five_hour": {"used_percentage": 10, "resets_at": int(reset.timestamp())}},
+            "saved_at": int(self.now.timestamp()),
+        })
+
+        start = token_bar.window_bounds(self.home, "five_hour", self.now)
+
+        self.assertEqual(start, reset - timedelta(hours=5))
+
+    def test_model_names_are_made_readable(self):
+        self.assertEqual(token_bar.model_label("claude-sonnet-5-5"), "Sonnet 5.5")
+        self.assertEqual(token_bar.model_label("claude-sonnet-5"), "Sonnet 5")
+        self.assertEqual(token_bar.model_label("claude-opus-4-1-20250805"), "Opus 4.1")
+        self.assertEqual(token_bar.model_label("some-other-model"), "some-other-model")
+        self.assertEqual(token_bar.model_label(None), "unknown")
+
+    def test_token_counts_are_shortened(self):
+        self.assertEqual(token_bar.format_tokens(4_247_811), "4.2M")
+        self.assertEqual(token_bar.format_tokens(53_000), "53k")
+        self.assertEqual(token_bar.format_tokens(800), "800")
+
+    def test_groups_past_the_top_are_folded_into_other(self):
+        requests = [{"tokens": 100 - i, "project": f"p{i}"} for i in range(7)]
+
+        rows = token_bar.grouped_shares(requests, lambda r: r["project"], top=5)
+
+        self.assertEqual([name for name, _ in rows], ["p0", "p1", "p2", "p3", "p4", "other"])
+        self.assertEqual(rows[-1][1], 95 + 94)
+
     def test_the_bar_fills_in_proportion(self):
         self.assertEqual(token_bar.usage_bar(0), "░" * 20)
         self.assertEqual(token_bar.usage_bar(100), "█" * 20)
@@ -286,6 +399,75 @@ class StatuslineTests(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertIn("left as it is", text)
         self.assertIn('python3 "/opt/token_bar.py" statusline', text)
+
+
+class WarnTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.now = datetime(2026, 10, 29, 12, 0, tzinfo=timezone.utc)
+        self.reset = int((self.now + timedelta(hours=2)).timestamp())
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def save(self, percent, saved_minutes_ago=0, reset=None, key="five_hour"):
+        token_bar.write_json(token_bar.live_path(self.home), {
+            "rate_limits": {key: {"used_percentage": percent, "resets_at": reset or self.reset}},
+            "saved_at": int((self.now - timedelta(minutes=saved_minutes_ago)).timestamp()),
+        })
+
+    def test_warns_once_when_a_window_crosses_80(self):
+        self.save(82)
+
+        first = token_bar.warning_output(self.home, self.now)
+        second = token_bar.warning_output(self.home, self.now)
+
+        self.assertEqual(json.loads(first), {"systemMessage": "token-bar: 5-hour usage is at 82%, resetting in 2h 0m"})
+        self.assertEqual(second, "")
+
+    def test_warns_again_at_90_but_not_between_levels(self):
+        self.save(82)
+        token_bar.warning_output(self.home, self.now)
+        self.save(86)
+        self.assertEqual(token_bar.warning_output(self.home, self.now), "")
+
+        self.save(91)
+
+        self.assertIn("is at 91%", token_bar.warning_output(self.home, self.now))
+
+    def test_a_new_reset_period_warns_again(self):
+        self.save(85)
+        token_bar.warning_output(self.home, self.now)
+        self.save(85, reset=self.reset + 5 * 3600)
+
+        self.assertIn("is at 85%", token_bar.warning_output(self.home, self.now))
+
+    def test_stays_quiet_below_80_and_for_old_readings_and_without_readings(self):
+        self.save(79)
+        self.assertEqual(token_bar.warning_output(self.home, self.now), "")
+
+        self.save(95, saved_minutes_ago=45)
+        self.assertEqual(token_bar.warning_output(self.home, self.now), "")
+
+        empty = Path(self.tmp.name) / "empty"
+        empty.mkdir()
+        self.assertEqual(token_bar.warning_output(empty, self.now), "")
+
+    def test_can_be_turned_off_with_an_environment_variable(self):
+        import os
+        from unittest import mock
+
+        self.save(95)
+        with mock.patch.dict(os.environ, {"TOKEN_BAR_NO_WARN": "1"}):
+            self.assertEqual(token_bar.warning_output(self.home, self.now), "")
+
+    def test_a_broken_state_file_never_raises(self):
+        self.save(90)
+        token_bar.warned_path(self.home).parent.mkdir(parents=True, exist_ok=True)
+        token_bar.warned_path(self.home).write_text("{ not json")
+
+        self.assertIn("is at 90%", token_bar.warning_output(self.home, self.now))
 
 
 class LauncherTests(unittest.TestCase):

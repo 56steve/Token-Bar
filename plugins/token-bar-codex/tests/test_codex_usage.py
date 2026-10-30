@@ -22,6 +22,25 @@ def token_count_line(when, primary=None, secondary=None, plan="plus"):
     })
 
 
+def usage_line(when, total, primary):
+    return json.dumps({
+        "timestamp": when.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {"total_token_usage": {"total_tokens": total}},
+            "rate_limits": {"primary": primary, "secondary": None, "plan_type": "plus"},
+        },
+    })
+
+
+def meta_lines(cwd, model):
+    return [
+        json.dumps({"type": "session_meta", "payload": {"cwd": cwd}}),
+        json.dumps({"type": "turn_context", "payload": {"cwd": cwd, "model": model}}),
+    ]
+
+
 def window(percent, minutes, resets_at):
     return {"used_percent": percent, "window_minutes": minutes, "resets_at": int(resets_at.timestamp())}
 
@@ -164,6 +183,89 @@ class CodexUsageTests(unittest.TestCase):
         self.assertIn("░" * 20 + "  2%", text)
         self.assertNotIn("→", text)
         self.assertNotIn("95%", text)
+
+    def test_projection_says_when_the_pace_hits_the_limit_before_the_reset(self):
+        self.assertEqual(
+            codex_usage.projection_text(70, 0.5, 100),
+            "at this pace you'd hit 100% in ~1h 0m, about 40 min before the reset",
+        )
+
+    def test_projection_says_where_the_pace_ends_up_when_it_makes_the_reset(self):
+        self.assertEqual(codex_usage.projection_text(40, 0.1, 120), "at this pace you'll reach ~52% by the reset")
+
+    def test_projection_is_skipped_for_long_windows_and_missing_data(self):
+        self.assertIsNone(codex_usage.projection_text(40, 0.1, 3000))
+        self.assertIsNone(codex_usage.projection_text(40, None, 120))
+        self.assertIsNone(codex_usage.projection_text(100, 0.1, 120))
+
+    def test_the_answer_shows_the_projection(self):
+        resets = self.now + timedelta(hours=3)
+        self.write_session("rollout-a.jsonl", [
+            token_count_line(self.now - timedelta(minutes=minutes), window(percent, 300, resets))
+            for minutes, percent in [(32, 20.0), (22, 21.0), (12, 22.0), (2, 23.0)]
+        ])
+
+        text = codex_usage.main(self.home, self.now)
+
+        self.assertIn("at this pace you'll reach ~41% by the reset", text)
+
+    def test_a_monthly_window_gets_no_projection(self):
+        resets = self.now + timedelta(days=20)
+        self.write_session("rollout-a.jsonl", [
+            token_count_line(self.now - timedelta(minutes=minutes), window(percent, 43200, resets))
+            for minutes, percent in [(32, 20.0), (2, 23.0)]
+        ])
+
+        self.assertNotIn("at this pace", codex_usage.main(self.home, self.now))
+
+    def test_breakdown_splits_tokens_by_project_and_model(self):
+        primary = window(30.0, 300, self.now + timedelta(hours=3))
+        self.write_session("rollout-a.jsonl", meta_lines("/work/alpha", "gpt-a") + [
+            usage_line(self.now - timedelta(minutes=60), 1000, primary),
+            usage_line(self.now - timedelta(minutes=30), 1600, primary),
+        ])
+        self.write_session("rollout-b.jsonl", meta_lines("/work/beta", "gpt-b") + [
+            usage_line(self.now - timedelta(minutes=20), 400, primary),
+        ])
+
+        text = codex_usage.main(self.home, self.now, command="breakdown")
+
+        self.assertIn("2k tokens counted", text)
+        self.assertRegex(text, r"alpha\s+█+░*\s+80%")
+        self.assertRegex(text, r"beta\s+█+░*\s+20%")
+        self.assertRegex(text, r"gpt-a\s+█+░*\s+80%")
+        self.assertIn("not exact shares of your limit", text)
+
+    def test_breakdown_counts_only_the_increase_inside_the_window(self):
+        primary = window(30.0, 300, self.now + timedelta(hours=3))
+        self.write_session("rollout-a.jsonl", meta_lines("/work/alpha", "gpt-a") + [
+            usage_line(self.now - timedelta(hours=10), 5000, primary),
+            usage_line(self.now - timedelta(minutes=60), 5300, primary),
+        ])
+
+        text = codex_usage.main(self.home, self.now, command="breakdown")
+
+        self.assertIn("300 tokens counted", text)
+
+    def test_breakdown_says_so_without_any_usage(self):
+        empty = self.home / "empty"
+        empty.mkdir()
+
+        text = codex_usage.main(empty, self.now, command="breakdown")
+
+        self.assertEqual(text, "No Codex usage found yet. Use Codex once, then run this again.")
+
+    def test_token_counts_are_shortened(self):
+        self.assertEqual(codex_usage.format_tokens(4_247_811), "4.2M")
+        self.assertEqual(codex_usage.format_tokens(53_000), "53k")
+        self.assertEqual(codex_usage.format_tokens(800), "800")
+
+    def test_groups_past_the_top_are_folded_into_other(self):
+        uses = [{"tokens": 100 - i, "project": f"p{i}"} for i in range(7)]
+
+        rows = codex_usage.grouped_shares(uses, lambda use: use["project"], top=5)
+
+        self.assertEqual([name for name, _ in rows], ["p0", "p1", "p2", "p3", "p4", "other"])
 
     def test_no_sessions_gives_a_clear_message(self):
         empty_home = self.home / "empty"

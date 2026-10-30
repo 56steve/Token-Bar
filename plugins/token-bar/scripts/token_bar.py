@@ -9,6 +9,7 @@ import argparse
 import json
 import math
 import os
+import re
 import shutil
 import sys
 from datetime import datetime, timedelta, timezone
@@ -25,6 +26,8 @@ ANSI_DIM = "\033[2m"
 LEVEL_COLORS = ((90, "\033[31m"), (70, "\033[33m"), (0, "\033[32m"))
 FRESH_MINUTES = 30
 LOOKBACK_MINUTES = 60
+PROJECTION_MAX_HOURS = 6
+WARN_LEVELS = (80, 90)
 HISTORY_KEEP_SECONDS = 3 * 3600
 HISTORY_MAX_ENTRIES = 400
 
@@ -158,8 +161,19 @@ def tokens_of(usage):
     return sum(int(usage.get(key) or 0) for key in ("input_tokens", "output_tokens", "cache_creation_input_tokens"))
 
 
-def scan_usage(projects, cutoff):
-    """(timestamp, tokens) for each request since `cutoff`. Streamed repeats are counted once."""
+def project_name(entry, path):
+    """The project a request belongs to: the folder Claude Code was working in."""
+    cwd = entry.get("cwd")
+    if cwd:
+        return Path(cwd).name or str(cwd)
+    return path.parent.name
+
+
+def scan_requests(projects, cutoff):
+    """Each request since `cutoff`, with its project, model, and whether a subagent made it.
+
+    Claude Code writes the same request several times as it streams, so each is counted once.
+    """
     if not projects.is_dir():
         return []
     by_request = {}
@@ -190,9 +204,20 @@ def scan_usage(projects, cutoff):
                 continue
             tokens = tokens_of(usage)
             previous = by_request.get(request_id)
-            if previous is None or previous[1] < tokens:
-                by_request[request_id] = (when, tokens)
+            if previous is None or previous["tokens"] < tokens:
+                by_request[request_id] = {
+                    "when": when,
+                    "tokens": tokens,
+                    "project": project_name(entry, path),
+                    "model": (entry.get("message") or {}).get("model"),
+                    "subagent": bool(entry.get("isSidechain")),
+                }
     return list(by_request.values())
+
+
+def scan_usage(projects, cutoff):
+    """(timestamp, tokens) for each request since `cutoff`."""
+    return [(request["when"], request["tokens"]) for request in scan_requests(projects, cutoff)]
 
 
 def recent_rate(records, start, now):
@@ -233,24 +258,57 @@ def format_age(seconds):
     return f"{minutes // (24 * 60)}d"
 
 
+def recent_readings(series, now):
+    """The readings from the last hour, or None when there are too few or the latest is old."""
+    if len(series) < 2:
+        return None
+    latest_when = series[-1][0]
+    if now - latest_when > timedelta(minutes=FRESH_MINUTES):
+        return None
+    return [(when, percent) for when, percent in series if when >= latest_when - timedelta(minutes=LOOKBACK_MINUTES)]
+
+
+def percent_rate(recent):
+    """How fast the percent rose over these readings, in percent per minute. None if it didn't rise."""
+    (first_when, first_percent), (latest_when, latest_percent) = recent[0], recent[-1]
+    gained = latest_percent - first_percent
+    span = (latest_when - first_when).total_seconds() / 60
+    return gained / span if gained > 0 and span > 0 else None
+
+
+def pace_in_percent(series, now):
+    """Percent per minute from a series of (time, percent) readings, or None when it can't be told."""
+    recent = recent_readings(series, now)
+    return percent_rate(recent) if recent else None
+
+
+def projection_text(percent, rate, minutes_to_reset):
+    """Whether the current pace reaches the limit before the window resets.
+
+    Only for windows resetting within PROJECTION_MAX_HOURS, because a pace measured over
+    an hour says little about a window that lasts days.
+    """
+    if rate is None or minutes_to_reset is None or percent >= 100:
+        return None
+    if minutes_to_reset > PROJECTION_MAX_HOURS * 60:
+        return None
+    minutes_to_full = (100 - percent) / rate
+    if minutes_to_full < minutes_to_reset:
+        gap = format_remaining((minutes_to_reset - minutes_to_full) * 60)
+        return f"at this pace you'd hit 100% in ~{format_remaining(minutes_to_full * 60)}, about {gap} before the reset"
+    return f"at this pace you'll reach ~{round(percent + rate * minutes_to_reset)}% by the reset"
+
+
 def minutes_to_next_percent(series, now):
     """Minutes until the percent next goes up, from how fast it moved in the last hour.
 
     Returns None when the reading is old or the percent hasn't moved recently.
     """
-    if len(series) < 2:
+    recent = recent_readings(series, now)
+    rate = percent_rate(recent) if recent else None
+    if rate is None:
         return None
-    latest_when, latest_percent = series[-1]
-    if now - latest_when > timedelta(minutes=FRESH_MINUTES):
-        return None
-    recent = [(when, percent) for when, percent in series if when >= latest_when - timedelta(minutes=LOOKBACK_MINUTES)]
-    first_when, first_percent = recent[0]
-    gained = latest_percent - first_percent
-    span = (latest_when - first_when).total_seconds() / 60
-    if gained <= 0 or span <= 0:
-        return None
-
-    rate = gained / span  # percent per minute
+    latest_when, latest_percent = recent[-1]
     since_reading = (now - latest_when).total_seconds() / 60
     if latest_percent == math.floor(latest_percent):
         # Whole-number readings: the next point arrives one step after the last increase.
@@ -270,7 +328,7 @@ def estimate_text(minutes):
     return "~" + format_remaining(minutes * 60)
 
 
-def render_block(label, width, percent, nxt, minutes, idle, resets_in):
+def render_block(label, width, percent, nxt, minutes, idle, resets_in, projection=None):
     """One limit as a bar, with the next point on the same line and the reset time under it."""
     head = f"{label:<{width + 2}}{usage_bar(percent)}  {math.floor(percent)}%"
     if percent >= 100:
@@ -282,6 +340,8 @@ def render_block(label, width, percent, nxt, minutes, idle, resets_in):
     lines = [head]
     if resets_in is not None:
         lines.append(f"{' ' * (width + 2)}resets in {resets_in}")
+    if projection:
+        lines.append(f"{' ' * (width + 2)}{projection}")
     return "\n".join(lines)
 
 
@@ -319,6 +379,9 @@ def build_report(home, now):
                 minutes = next_point(percent, limit, tokens_per_minute)[1]
             fresh = now - saved_at <= timedelta(minutes=FRESH_MINUTES)
             idle = minutes is None and fresh and len(series) >= 2 and percent < 100
+            rate = pace_in_percent(series, now)
+            if rate is None and limit and tokens_per_minute > 0:
+                rate = tokens_per_minute / limit * 100
         else:
             used = sum(tokens for when, tokens in records if start <= when <= now)
             percent = used / limit * 100
@@ -326,9 +389,12 @@ def build_report(home, now):
             sources[window["label"]] = "estimate from your calibration"
             nxt, minutes = next_point(percent, limit, tokens_per_minute)
             idle = nxt is not None and minutes is None
+            rate = tokens_per_minute / limit * 100 if tokens_per_minute > 0 else None
 
         resets_in = format_remaining((resets_at - now).total_seconds()) if resets_at else None
-        entries.append((window["label"], percent, nxt, minutes, idle, resets_in))
+        minutes_to_reset = (resets_at - now).total_seconds() / 60 if resets_at else None
+        projection = projection_text(percent, rate, minutes_to_reset)
+        entries.append((window["label"], percent, nxt, minutes, idle, resets_in, projection))
 
     live_on = "on" if readings else "off"
     width = max((len(entry[0]) for entry in entries), default=0)
@@ -353,6 +419,127 @@ def build_report(home, now):
     if not records and not readings:
         text += f"\n\nNo Claude Code usage found in the last {PROJECTS_DAYS} days."
     return f"{text}\nLive numbers: {live_on}"
+
+
+def model_label(name):
+    """'claude-sonnet-5-5' becomes 'Sonnet 5.5'. Names that don't fit the pattern are shown as they are."""
+    if not name:
+        return "unknown"
+    match = re.fullmatch(r"claude-([a-z]+)-(\d+(?:-\d{1,2})*)(?:-\d{8})?", name)
+    if not match:
+        return name
+    return f"{match.group(1).capitalize()} {match.group(2).replace('-', '.')}"
+
+
+def format_tokens(count):
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M"
+    if count >= 1_000:
+        return f"{count / 1_000:.0f}k"
+    return str(count)
+
+
+def grouped_shares(requests, key, top=5):
+    """(name, tokens) per group, largest first. Groups past `top` are folded into 'other'."""
+    totals = {}
+    for request in requests:
+        name = key(request)
+        totals[name] = totals.get(name, 0) + request["tokens"]
+    ordered = sorted(totals.items(), key=lambda item: -item[1])
+    shown = ordered[:top]
+    rest = sum(tokens for _, tokens in ordered[top:])
+    if rest:
+        shown.append(("other", rest))
+    return shown
+
+
+def share_lines(title, rows, total):
+    name_width = 26
+    lines = [title]
+    for name, tokens in rows:
+        share = round(tokens / total * 100)
+        shown = name if len(name) <= name_width - 1 else name[: name_width - 2] + "…"
+        lines.append(f"  {shown:<{name_width}}{usage_bar(share, 12)}  {share:>3}%")
+    return lines
+
+
+def window_bounds(home, key, now):
+    """Start of the current window: from Claude's reset time, your calibrated reset, or a rolling guess."""
+    window = WINDOWS[key]
+    period = timedelta(hours=window["hours"])
+    reading = (read_live(home).get("rate_limits") or {}).get(window["live"])
+    if reading:
+        reset = datetime.fromtimestamp(int(reading["resets_at"]), timezone.utc)
+        if reset > now:
+            return reset - period
+    setting = (read_json(config_path(home)) or {}).get(key)
+    if setting and setting.get("reset_at"):
+        return window_start(parse_time(setting["reset_at"]), period, now)
+    return now - period
+
+
+def breakdown_text(requests, window_label):
+    total = sum(request["tokens"] for request in requests)
+    if not total:
+        return f"No Claude Code usage in the current {window_label} window yet."
+    subagent = sum(request["tokens"] for request in requests if request["subagent"])
+    kinds = [("Main conversation", total - subagent), ("Subagents", subagent)]
+
+    lines = [f"Where your tokens went in the current {window_label} window · {format_tokens(total)} tokens counted", ""]
+    lines += share_lines("By project", grouped_shares(requests, lambda r: r["project"]), total)
+    lines += [""] + share_lines("By model", grouped_shares(requests, lambda r: model_label(r["model"])), total)
+    lines += [""] + share_lines("By who made the request", [row for row in kinds if row[1]], total)
+    lines += ["", "These are shares of the tokens counted from your logs. Claude weighs tokens in ways the logs",
+              "don't show, so they are not exact shares of your limit."]
+    return "\n".join(lines)
+
+
+def warned_path(home):
+    return data_dir(home) / "warned.json"
+
+
+def warning_for(home, now):
+    """A heads-up the first time a window crosses a warning level in a reset period, else None.
+
+    Uses only Claude's saved readings, so it is fast enough to run on every prompt, and it
+    says nothing when the readings are old.
+    """
+    live = read_live(home)
+    readings = live.get("rate_limits") or {}
+    saved_at = datetime.fromtimestamp(int(live.get("saved_at", 0)), timezone.utc)
+    if not readings or now - saved_at > timedelta(minutes=FRESH_MINUTES):
+        return None
+
+    state = read_json(warned_path(home)) or {}
+    messages = []
+    for key, window in WINDOWS.items():
+        reading = readings.get(window["live"])
+        if not reading:
+            continue
+        percent = float(reading["used_percentage"])
+        reset = int(reading["resets_at"])
+        level = max((threshold for threshold in WARN_LEVELS if percent >= threshold), default=0)
+        previous = state.get(key) or {}
+        already_told = previous.get("level", 0) if previous.get("reset") == reset else 0
+        if level > already_told:
+            state[key] = {"reset": reset, "level": level}
+            resets_in = format_remaining(reset - now.timestamp())
+            messages.append(f"{window['label']} usage is at {math.floor(percent)}%, resetting in {resets_in}")
+    if not messages:
+        return None
+    write_json(warned_path(home), state)
+    return "token-bar: " + "; ".join(messages)
+
+
+def warning_output(home, now):
+    """The JSON a Claude Code hook prints to show a message to the user. Empty when there is nothing to say."""
+    if os.environ.get("TOKEN_BAR_NO_WARN"):
+        return ""
+    try:
+        message = warning_for(home, now)
+    except (OSError, ValueError, TypeError):
+        return ""
+    return json.dumps({"systemMessage": message}) if message else ""
 
 
 def calibrate(home, key, percent_text, reset_text, now):
@@ -468,12 +655,21 @@ def main(argv, home, stdin_text=None, script_path=None):
     cal.add_argument("reset", nargs="+")
     commands.add_parser("statusline")
     commands.add_parser("enable-statusline")
+    commands.add_parser("warn")
+    breakdown = commands.add_parser("breakdown")
+    breakdown.add_argument("window", nargs="?", choices=sorted(WINDOWS), default="five_hour")
     args = parser.parse_args(argv)
 
     now = datetime.now(timezone.utc)
     try:
         if args.command in (None, "status"):
             return build_report(home, now), 0
+        if args.command == "warn":
+            return warning_output(home, now), 0
+        if args.command == "breakdown":
+            start = window_bounds(home, args.window, now)
+            requests = [r for r in scan_requests(home / ".claude" / "projects", start) if r["when"] <= now]
+            return breakdown_text(requests, WINDOWS[args.window]["label"].lower()), 0
         if args.command == "calibrate":
             return calibrate(home, args.window, args.percent, " ".join(args.reset), now), 0
         if args.command == "statusline":
@@ -502,5 +698,6 @@ if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")  # the bars need UTF-8, which some Windows consoles lack
     output, code = main(sys.argv[1:], Path.home())
-    print(output)
+    if output:  # the warn hook prints nothing when there is nothing to say
+        print(output)
     sys.exit(code)

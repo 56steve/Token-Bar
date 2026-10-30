@@ -60,6 +60,12 @@ Then ask Codex: **show my Codex usage limits**.
 
 There is nothing to set up. Codex already writes your limits into its own session logs, and token-bar reads them. The answer shows each window as a bar with its percent, an estimate of when it next goes up, when it resets, and how old the reading is.
 
+## More than a percent
+
+- **Will you make it to the reset?** Under the reset time, token-bar says whether your current pace reaches the limit first, for example "at this pace you'd hit 100% in ~1h 5m, about 35 min before the reset", or where you'll end up, such as "you'll reach ~41% by the reset". It only shows this for windows that reset within 6 hours, because a pace measured over an hour says little about a window that lasts days.
+- **What's using your limit?** Run `/token-bar:token breakdown` in Claude Code, or ask Codex "what is using my Codex limit?". You get the share of tokens by project and by model. In Claude Code it also splits out what your subagents used. These are shares of the tokens counted from the logs, not exact shares of your limit, because the tools weigh tokens in ways the logs don't show.
+- **A heads-up before you hit the wall (Claude Code, with live numbers).** A small hook tells you once when a window first crosses 80% and again at 90%, and stays quiet otherwise. Set `TOKEN_BAR_NO_WARN=1` to turn it off. This one is new: its logic is tested, but it hasn't been seen in a live Claude Code session yet.
+
 ## Supported tools
 
 | Tool | Status | Where the numbers come from |

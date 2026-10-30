@@ -1,7 +1,7 @@
 ---
 name: token
-description: Show your Claude usage against your 5-hour and weekly limits, and when the next whole percent lands. Use when the user runs /token-bar:token or asks how close they are to their Claude limit.
-argument-hint: [status | calibrate | statusline]
+description: Show your Claude usage against your 5-hour and weekly limits, when the next whole percent lands, and what is using it up. Use when the user runs /token-bar:token or asks how close they are to their Claude limit or what is eating it.
+argument-hint: [status | breakdown | calibrate | statusline]
 allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py" *)
 ---
 
@@ -29,6 +29,10 @@ The script is at `${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py`. Run it as:
 
    Do the same for the weekly window with `weekly` and a time such as `Sun 5:30 AM`. Show the script's result, then run `status` again. If the user skips a window, move on and don't ask again in this session.
 
-4. If the user passes an argument, follow it: `calibrate` means step 3, `statusline` means step 2, and `status` or no argument means step 1.
+4. If the user passes an argument, follow it: `calibrate` means step 3, `statusline` means step 2, `breakdown` means step 5, and `status` or no argument means step 1.
+
+5. For `breakdown`, or when the user asks what is using up their limit, run the script with `breakdown` (add `weekly` for the weekly window) and show its output inside a code block, exactly as printed:
+
+       python3 "${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py" breakdown
 
 If the shell reports `python3: command not found`, tell the user Python 3 is needed and don't try to install it yourself.
