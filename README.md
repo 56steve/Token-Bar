@@ -27,14 +27,14 @@ That's it. Nothing to download, nothing to build, and no account to create.
 
 ## Use
 
-Run `/token-bar:token` in Claude Code. The first time, it asks two quick questions in chat:
+Run `/token-bar:token` in Claude Code. The first time, it asks one question: **do you want live numbers?**
 
-1. The percentage Claude shows for your 5-hour limit right now, and when it resets.
-2. The same for your weekly limit.
+- **Yes (recommended).** It adds a status line to your Claude settings. Claude reports your real 5-hour and weekly percentages to it, so you never type a number. Run `/token-bar:token` once more and it shows your live usage.
+- **No.** It asks for the percentage Claude shows for each window, and when it resets, in chat. After that, it estimates your usage.
 
-After that, it shows your usage every time.
+It only changes the one status line setting, and it never replaces a status line you already have.
 
-For the most accurate numbers, turn on the **live status line**. `/token-bar:token` will offer this in chat. It reads Claude's own percentages, so you won't have to enter anything. After you turn it on, send one message in Claude Code, then run `/token-bar:token` again.
+Why one yes is needed: Claude Code only gives your real percentages to the status line, and a plugin can't turn that on by itself. It has to be in your own settings, so token-bar asks first.
 
 ## How it works
 
