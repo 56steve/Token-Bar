@@ -54,6 +54,10 @@ codex plugin add token-bar@token-bar
 
 Then ask Codex: **show my Codex usage limits**.
 
+![A real answer from Codex with token-bar installed: a bar for monthly usage at 5%, next point 6% in under a minute, resets in 29d 23h](assets/codex-answer.png)
+
+*A real answer from Codex with the plugin installed.*
+
 There is nothing to set up. Codex already writes your limits into its own session logs, and token-bar reads them. The answer shows each window as a bar with its percent, an estimate of when it next goes up, when it resets, and how old the reading is.
 
 ## Supported tools
