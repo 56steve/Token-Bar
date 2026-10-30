@@ -28,6 +28,7 @@ FRESH_MINUTES = 30
 LOOKBACK_MINUTES = 60
 PROJECTION_MAX_HOURS = 6
 WARN_LEVELS = (80, 90)
+SHORTCUT_MARKER = "<!-- installed by token-bar -->"
 HISTORY_KEEP_SECONDS = 3 * 3600
 HISTORY_MAX_ENTRIES = 400
 
@@ -405,7 +406,7 @@ def build_report(home, now):
             label = WINDOWS[key]["label"].lower()
             lines.append(f"  {key}: the {label} percent Claude shows now, and when it resets")
         lines.append(f"Live numbers: {live_on}")
-        return "\n".join(lines)
+        return "\n".join(lines) + shortcut_hint(home)
 
     text = "\n\n".join(blocks)
     distinct = set(sources.values())
@@ -418,7 +419,7 @@ def build_report(home, now):
         text += f"\n\nNot set up yet: {names}. Ask the user for its percent and reset time to add it."
     if not records and not readings:
         text += f"\n\nNo Claude Code usage found in the last {PROJECTS_DAYS} days."
-    return f"{text}\nLive numbers: {live_on}"
+    return f"{text}\nLive numbers: {live_on}{shortcut_hint(home)}"
 
 
 def model_label(name):
@@ -619,6 +620,51 @@ def save_statusline_payload(home, payload_text, now, color=False):
     return statusline_text(model, readings, now, color)
 
 
+def shortcut_path(home):
+    return home / ".claude" / "skills" / "token" / "SKILL.md"
+
+
+def shortcut_hint(home):
+    """A last line telling the skill the short /token command isn't set up. Empty once it is."""
+    return "" if shortcut_path(home).exists() else "\nShort command: off"
+
+
+SHORTCUT_SKILL = f"""---
+name: token
+description: Show your Claude usage against your 5-hour and weekly limits, when the next whole percent lands, and what is using it up. Use when the user runs /token or asks how close they are to their Claude limit.
+argument-hint: [status | breakdown | calibrate | statusline]
+---
+
+This is a shortcut for the token-bar plugin. Call the Skill tool with skill `token-bar:token` and args `$ARGUMENTS`, then follow that skill's instructions exactly.
+
+If that skill isn't available, the token-bar plugin isn't installed. Tell the user to run these two commands in Claude Code, then try again:
+
+    /plugin marketplace add 56steve/Token-Bar
+    /plugin install token-bar --marketplace 56steve/Token-Bar
+
+{SHORTCUT_MARKER}
+"""
+
+
+def install_shortcut(home):
+    """Adds a personal /token skill, so the command works without the plugin's name in front.
+
+    Plugin skills always carry the plugin name, but a skill in the user's own skills folder
+    doesn't. The skill only hands off to the plugin's own skill, so it never goes out of date.
+    A skill the user wrote themselves is never replaced.
+    """
+    target = shortcut_path(home)
+    if target.exists():
+        current = target.read_text(errors="ignore")
+        if SHORTCUT_MARKER not in current:
+            return "kept", 3
+        if current == SHORTCUT_SKILL:
+            return "already", 0
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(SHORTCUT_SKILL)
+    return "set", 0
+
+
 def enable_statusline(home, script_path):
     """Adds the status line to Claude's settings. Never replaces a status line the user already has."""
     settings_file = home / ".claude" / "settings.json"
@@ -656,6 +702,7 @@ def main(argv, home, stdin_text=None, script_path=None):
     commands.add_parser("statusline")
     commands.add_parser("enable-statusline")
     commands.add_parser("warn")
+    commands.add_parser("install-shortcut")
     breakdown = commands.add_parser("breakdown")
     breakdown.add_argument("window", nargs="?", choices=sorted(WINDOWS), default="five_hour")
     args = parser.parse_args(argv)
@@ -666,6 +713,14 @@ def main(argv, home, stdin_text=None, script_path=None):
             return build_report(home, now), 0
         if args.command == "warn":
             return warning_output(home, now), 0
+        if args.command == "install-shortcut":
+            result, code = install_shortcut(home)
+            messages = {
+                "set": "Added the short /token command. If it isn't listed yet, restart Claude Code.",
+                "already": "The short /token command was already added.",
+                "kept": "You already have your own /token skill, so it was left as it is.",
+            }
+            return messages[result], code
         if args.command == "breakdown":
             start = window_bounds(home, args.window, now)
             requests = [r for r in scan_requests(home / ".claude" / "projects", start) if r["when"] <= now]

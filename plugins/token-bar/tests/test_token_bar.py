@@ -470,6 +470,65 @@ class WarnTests(unittest.TestCase):
         self.assertIn("is at 90%", token_bar.warning_output(self.home, self.now))
 
 
+class ShortcutTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_adds_a_personal_token_skill_that_hands_off_to_the_plugin(self):
+        result = token_bar.install_shortcut(self.home)
+
+        text = token_bar.shortcut_path(self.home).read_text()
+        self.assertEqual(result, ("set", 0))
+        self.assertIn("name: token\n", text)
+        self.assertIn("skill `token-bar:token` and args `$ARGUMENTS`", text)
+        self.assertIn("/plugin install token-bar --marketplace 56steve/Token-Bar", text)
+        self.assertNotIn("${CLAUDE_PLUGIN_ROOT}", text)
+        self.assertIn(token_bar.SHORTCUT_MARKER, text)
+
+    def test_running_it_twice_says_it_is_already_added(self):
+        token_bar.install_shortcut(self.home)
+
+        self.assertEqual(token_bar.install_shortcut(self.home), ("already", 0))
+
+    def test_a_skill_the_user_wrote_is_never_replaced(self):
+        mine = token_bar.shortcut_path(self.home)
+        mine.parent.mkdir(parents=True)
+        mine.write_text("---\nname: token\n---\nMy own skill.\n")
+
+        result = token_bar.install_shortcut(self.home)
+
+        self.assertEqual(result, ("kept", 3))
+        self.assertEqual(mine.read_text(), "---\nname: token\n---\nMy own skill.\n")
+
+    def test_an_older_copy_of_ours_is_brought_up_to_date(self):
+        old = token_bar.shortcut_path(self.home)
+        old.parent.mkdir(parents=True)
+        old.write_text(f"old text\n\n{token_bar.SHORTCUT_MARKER}\n")
+
+        result = token_bar.install_shortcut(self.home)
+
+        self.assertEqual(result, ("set", 0))
+        self.assertIn("name: token", old.read_text())
+
+    def test_the_command_reports_what_it_did(self):
+        text, code = token_bar.main(["install-shortcut"], self.home)
+
+        self.assertEqual(code, 0)
+        self.assertIn("Added the short /token command", text)
+
+    def test_status_says_the_short_command_is_off_until_it_is_added(self):
+        before = token_bar.build_report(self.home, datetime.now(timezone.utc))
+        token_bar.install_shortcut(self.home)
+        after = token_bar.build_report(self.home, datetime.now(timezone.utc))
+
+        self.assertTrue(before.endswith("Short command: off"))
+        self.assertNotIn("Short command", after)
+
+
 class LauncherTests(unittest.TestCase):
     def test_picks_the_highest_version_numerically(self):
         paths = [
