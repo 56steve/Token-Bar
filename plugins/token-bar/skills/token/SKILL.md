@@ -21,7 +21,7 @@ The script is at `${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py`. Run it as:
 
        python3 "${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py" enable-statusline
 
-   If it says the status line was set, tell the user to run `/token-bar:token` once more. Claude only reports usage after its next reply, and the status line saves it then. If it says a different status line was kept, tell the user you left their existing status line alone, show them the line the script printed so they can add it to their own status line script if they want live numbers, and go to step 3. Don't offer this again in the same session.
+   If it says the status line was set, Claude Code runs the status line right away, so run `status` again immediately. If it now ends with `Live numbers: on`, show it as printed and you're done. If live numbers are still off, tell the user Claude only reports usage after its next reply, so they should run `/token-bar:token` once more after that. If it says a different status line was kept, tell the user you left their existing status line alone, show them the line the script printed so they can add it to their own status line script if they want live numbers, and go to step 3. Don't offer this again in the same session.
 
 3. Use manual numbers only if the user said no to live numbers, if they already have a different status line, or if live numbers are still off after they ran the command a second time. Live numbers need a Claude.ai Pro or Max account, so API-key users always end up here. Then, if the output starts with `Setup needed`, ask in chat, one window at a time. For the 5-hour window, ask: "What percent does Claude show for your 5-hour limit right now, and when does it reset? For example: 40, and 2:20 PM." Then run:
 
