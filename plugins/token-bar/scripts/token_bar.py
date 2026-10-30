@@ -8,6 +8,8 @@ Data lives in ~/.claude/token-bar/, next to Claude's own session logs.
 import argparse
 import json
 import math
+import os
+import shutil
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,6 +18,11 @@ PACE_MINUTES = 30
 PROJECTS_DAYS = 7
 ROUGH_BELOW_PERCENT = 10
 BAR_WIDTH = 20
+STATUSLINE_BAR_WIDTH = 10
+ANSI_RESET = "\033[0m"
+ANSI_DIM = "\033[2m"
+# (from this percent up, color code), checked from the top: red, yellow, green.
+LEVEL_COLORS = ((90, "\033[31m"), (70, "\033[33m"), (0, "\033[32m"))
 FRESH_MINUTES = 30
 LOOKBACK_MINUTES = 60
 HISTORY_KEEP_SECONDS = 3 * 3600
@@ -252,9 +259,9 @@ def minutes_to_next_percent(series, now):
     return max((math.floor(latest_percent) + 1 - latest_percent) / rate - since_reading, 0)
 
 
-def usage_bar(percent):
-    filled = max(0, min(BAR_WIDTH, round(percent / 100 * BAR_WIDTH)))
-    return "█" * filled + "░" * (BAR_WIDTH - filled)
+def usage_bar(percent, width=BAR_WIDTH):
+    filled = max(0, min(width, round(percent / 100 * width)))
+    return "█" * filled + "░" * (width - filled)
 
 
 def estimate_text(minutes):
@@ -373,13 +380,46 @@ def calibrate(home, key, percent_text, reset_text, now):
     return f"Calibrated. Your {window['label'].lower()} limit is about {limit:,} tokens, resetting {local_reset}."
 
 
-def save_statusline_payload(home, payload_text, now):
-    """Saves Claude's rate limits from a status line payload, and returns the one-line summary."""
+def level_color(percent):
+    """Green below 70%, yellow from 70%, red from 90%."""
+    for threshold, code in LEVEL_COLORS:
+        if percent >= threshold:
+            return code
+    return LEVEL_COLORS[-1][1]
+
+
+def statusline_text(model, readings, now, color):
+    """The one-line status line: model, a bar for each window, and the next reset."""
+
+    def paint(text, code):
+        return f"{code}{text}{ANSI_RESET}" if color else text
+
+    parts = [paint(model, ANSI_DIM)] if model else []
+    resets = []
+    for short, key in (("5h", "five_hour"), ("wk", "seven_day")):
+        reading = readings.get(key)
+        if not reading:
+            continue
+        percent = float(reading["used_percentage"])
+        parts.append(paint(f"{short} {usage_bar(percent, STATUSLINE_BAR_WIDTH)} {math.floor(percent)}%", level_color(percent)))
+        resets.append(datetime.fromtimestamp(int(reading["resets_at"]), timezone.utc))
+
+    if not resets:
+        return paint("token-bar: no readings yet", ANSI_DIM)
+    upcoming = [at for at in resets if at > now]
+    if upcoming:
+        parts.append(paint(f"resets {format_remaining((min(upcoming) - now).total_seconds())}", ANSI_DIM))
+    return paint(" · ", ANSI_DIM).join(parts)
+
+
+def save_statusline_payload(home, payload_text, now, color=False):
+    """Saves Claude's rate limits from a status line payload, and returns the status line text."""
     try:
         payload = json.loads(payload_text)
     except ValueError:
         payload = None
-    rate_limits = payload.get("rate_limits") if isinstance(payload, dict) else None
+    payload = payload if isinstance(payload, dict) else {}
+    rate_limits = payload.get("rate_limits")
     if rate_limits:
         try:
             write_json(live_path(home), {"rate_limits": rate_limits, "saved_at": int(now.timestamp())})
@@ -388,12 +428,8 @@ def save_statusline_payload(home, payload_text, now):
             print(f"token-bar: could not save readings: {error}", file=sys.stderr)
 
     readings = (read_json(live_path(home)) or {}).get("rate_limits") or {}
-    parts = []
-    for key, window in WINDOWS.items():
-        reading = readings.get(window["live"])
-        if reading:
-            parts.append(f"{window['label'].lower()} {math.floor(float(reading['used_percentage']))}%")
-    return " · ".join(parts) or "token-bar: no readings yet"
+    model = (payload.get("model") or {}).get("display_name") if isinstance(payload.get("model"), dict) else None
+    return statusline_text(model, readings, now, color)
 
 
 def enable_statusline(home, script_path):
@@ -402,12 +438,20 @@ def enable_statusline(home, script_path):
     settings = {}
     if settings_file.exists():
         settings = json.loads(settings_file.read_text())
-    command = f'python3 "{script_path}" statusline'
+    launcher = data_dir(home) / "statusline_launcher.py"
+    command = f'python3 "{launcher}"'
     current = settings.get("statusLine")
-    if current and current.get("command") == command:
+    current_command = current.get("command", "") if isinstance(current, dict) else ""
+    if current_command == command:
         return "already", 0
-    if current:
+    ours = "token_bar.py" in current_command or "statusline_launcher.py" in current_command
+    if current and not ours:
         return "kept", 3
+
+    # The launcher lives in a stable place and finds the newest installed plugin each run,
+    # so a plugin update can't leave the setting pointing at a removed folder.
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(Path(script_path).parent / "statusline_launcher.py", launcher)
     settings["statusLine"] = {"type": "command", "command": command}
     write_json(settings_file, settings)
     return "set", 0
@@ -434,7 +478,8 @@ def main(argv, home, stdin_text=None, script_path=None):
             return calibrate(home, args.window, args.percent, " ".join(args.reset), now), 0
         if args.command == "statusline":
             text = stdin_text if stdin_text is not None else sys.stdin.read()
-            return save_statusline_payload(home, text, now), 0
+            color = "NO_COLOR" not in os.environ  # https://no-color.org
+            return save_statusline_payload(home, text, now, color=color), 0
         if args.command == "enable-statusline":
             script = script_path or Path(__file__).resolve()
             result, code = enable_statusline(home, script)

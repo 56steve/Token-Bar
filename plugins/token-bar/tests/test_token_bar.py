@@ -7,6 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
+import statusline_launcher  # noqa: E402
 import token_bar  # noqa: E402
 
 
@@ -228,7 +229,7 @@ class StatuslineTests(unittest.TestCase):
 
         summary = token_bar.save_statusline_payload(self.home, payload, self.now)
 
-        self.assertEqual(summary, "weekly 78%")
+        self.assertIn("wk " + "█" * 8 + "░" * 2 + " 78%", summary)
         saved = json.loads(token_bar.live_path(self.home).read_text())
         self.assertEqual(saved["saved_at"], int(self.now.timestamp()))
 
@@ -242,12 +243,30 @@ class StatuslineTests(unittest.TestCase):
         settings = self.home / ".claude" / "settings.json"
         token_bar.write_json(settings, {"theme": "dark"})
 
-        result, code = token_bar.enable_statusline(self.home, Path("/opt/token_bar.py"))
+        result, code = token_bar.enable_statusline(self.home, Path(token_bar.__file__).resolve())
 
         self.assertEqual((result, code), ("set", 0))
         saved = json.loads(settings.read_text())
+        launcher = self.home / ".claude" / "token-bar" / "statusline_launcher.py"
         self.assertEqual(saved["theme"], "dark")
-        self.assertEqual(saved["statusLine"]["command"], 'python3 "/opt/token_bar.py" statusline')
+        self.assertEqual(saved["statusLine"]["command"], f'python3 "{launcher}"')
+        self.assertTrue(launcher.exists())
+
+    def test_enable_replaces_an_older_token_bar_command_with_the_launcher(self):
+        settings = self.home / ".claude" / "settings.json"
+        old = 'python3 "/old/cache/0.1.0/scripts/token_bar.py" statusline'
+        token_bar.write_json(settings, {"statusLine": {"type": "command", "command": old}})
+
+        result, code = token_bar.enable_statusline(self.home, Path(token_bar.__file__).resolve())
+
+        self.assertEqual((result, code), ("set", 0))
+        self.assertIn("statusline_launcher.py", json.loads(settings.read_text())["statusLine"]["command"])
+
+    def test_enable_twice_says_it_is_already_set_up(self):
+        script = Path(token_bar.__file__).resolve()
+        token_bar.enable_statusline(self.home, script)
+
+        self.assertEqual(token_bar.enable_statusline(self.home, script), ("already", 0))
 
     def test_enable_leaves_a_different_status_line_alone(self):
         settings = self.home / ".claude" / "settings.json"
@@ -267,6 +286,100 @@ class StatuslineTests(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertIn("left as it is", text)
         self.assertIn('python3 "/opt/token_bar.py" statusline', text)
+
+
+class LauncherTests(unittest.TestCase):
+    def test_picks_the_highest_version_numerically(self):
+        paths = [
+            "/h/.claude/plugins/cache/token-bar/token-bar/0.1.9/scripts/token_bar.py",
+            "/h/.claude/plugins/cache/token-bar/token-bar/0.1.10/scripts/token_bar.py",
+            "/h/.claude/plugins/cache/token-bar/token-bar/0.1.2/scripts/token_bar.py",
+        ]
+
+        self.assertTrue(statusline_launcher.newest(paths).endswith("0.1.10/scripts/token_bar.py"))
+
+    def test_no_installed_plugin_gives_none(self):
+        self.assertIsNone(statusline_launcher.newest([]))
+
+
+class StatuslineDisplayTests(unittest.TestCase):
+    now = datetime(2026, 10, 29, 12, 0, tzinfo=timezone.utc)
+    GREEN, YELLOW, RED, RESET = "\033[32m", "\033[33m", "\033[31m", "\033[0m"
+
+    def readings(self, five=None, week=None, five_resets=None):
+        out = {}
+        if five is not None:
+            resets = five_resets or self.now + timedelta(hours=3, minutes=10)
+            out["five_hour"] = {"used_percentage": five, "resets_at": int(resets.timestamp())}
+        if week is not None:
+            out["seven_day"] = {"used_percentage": week, "resets_at": int((self.now + timedelta(days=2)).timestamp())}
+        return out
+
+    def test_plain_text_without_color(self):
+        text = token_bar.statusline_text("Opus", self.readings(21, 40), self.now, color=False)
+
+        self.assertEqual(text, "Opus · 5h ██░░░░░░░░ 21% · wk ████░░░░░░ 40% · resets 3h 10m")
+
+    def test_color_follows_the_level(self):
+        low = token_bar.statusline_text(None, self.readings(21), self.now, color=True)
+        mid = token_bar.statusline_text(None, self.readings(78), self.now, color=True)
+        high = token_bar.statusline_text(None, self.readings(94), self.now, color=True)
+
+        self.assertIn(self.GREEN + "5h", low)
+        self.assertIn(self.YELLOW + "5h", mid)
+        self.assertIn(self.RED + "5h", high)
+        self.assertIn(self.RESET, high)
+
+    def test_each_window_is_colored_on_its_own(self):
+        text = token_bar.statusline_text(None, self.readings(21, 83), self.now, color=True)
+
+        self.assertIn(self.GREEN + "5h", text)
+        self.assertIn(self.YELLOW + "wk", text)
+
+    def test_color_thresholds_sit_at_70_and_90(self):
+        self.assertEqual(token_bar.level_color(0), self.GREEN)
+        self.assertEqual(token_bar.level_color(69.9), self.GREEN)
+        self.assertEqual(token_bar.level_color(70), self.YELLOW)
+        self.assertEqual(token_bar.level_color(89.9), self.YELLOW)
+        self.assertEqual(token_bar.level_color(90), self.RED)
+        self.assertEqual(token_bar.level_color(100), self.RED)
+
+    def test_no_color_codes_when_color_is_off(self):
+        text = token_bar.statusline_text("Opus", self.readings(94, 80), self.now, color=False)
+
+        self.assertNotIn("\033", text)
+
+    def test_shows_only_the_windows_claude_reported(self):
+        text = token_bar.statusline_text(None, self.readings(week=55), self.now, color=False)
+
+        self.assertTrue(text.startswith("wk "))
+        self.assertNotIn("5h", text)
+
+    def test_says_so_when_there_are_no_readings(self):
+        self.assertEqual(token_bar.statusline_text(None, {}, self.now, color=False), "token-bar: no readings yet")
+
+    def test_skips_the_reset_for_a_window_that_has_already_reset(self):
+        past = self.now - timedelta(minutes=5)
+
+        text = token_bar.statusline_text(None, self.readings(five=50, five_resets=past), self.now, color=False)
+
+        self.assertNotIn("resets", text)
+
+    def test_the_command_colors_unless_no_color_is_set(self):
+        import os
+        from unittest import mock
+
+        payload = json.dumps({"rate_limits": {"five_hour": {"used_percentage": 94, "resets_at": int((datetime.now(timezone.utc) + timedelta(hours=1)).timestamp())}}})
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("NO_COLOR", None)
+                colored, _ = token_bar.main(["statusline"], home, stdin_text=payload)
+            with mock.patch.dict(os.environ, {"NO_COLOR": "1"}):
+                plain, _ = token_bar.main(["statusline"], home, stdin_text=payload)
+
+        self.assertIn("\033[31m", colored)
+        self.assertNotIn("\033", plain)
 
 
 if __name__ == "__main__":
