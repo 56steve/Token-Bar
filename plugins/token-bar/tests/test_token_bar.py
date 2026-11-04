@@ -457,7 +457,7 @@ class UsageTests(unittest.TestCase):
 
         text = token_bar.build_report(self.home, self.now)
 
-        self.assertIn("≈ Estimate, can be a few points off", text)
+        self.assertIn("≈ Estimate from your sync 0 min ago, can be a few points off", text)
         self.assertIn("the % your app shows", text)
 
     def test_live_numbers_carry_no_estimate_warning(self):
@@ -502,6 +502,108 @@ class UsageTests(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertIn("is not a percentage", message)
+
+    def synced_setting(self, percent, minutes_ago, limit=1_000_000):
+        at = self.now - timedelta(minutes=minutes_ago)
+        return {"limit": limit, "synced": {"percent": percent, "at": at.isoformat()}}
+
+    def save_weekly_config(self, setting):
+        """Saves a weekly setting whose reset is three days away, so the window is the last four days."""
+        setting = dict(setting, reset_at=(self.now + timedelta(days=3)).isoformat())
+        token_bar.write_json(token_bar.config_path(self.home), {"weekly": setting, "weekly_only": True})
+
+    def test_the_estimate_is_the_last_sync_plus_the_usage_since(self):
+        start = self.now - timedelta(days=3)
+        records = [
+            (self.now - timedelta(hours=5), 500_000),    # before the sync, already in its percent
+            (self.now - timedelta(minutes=30), 100_000),
+            (self.now - timedelta(minutes=5), 50_000),
+        ]
+
+        percent, age = token_bar.percent_since_sync(self.synced_setting(60, 60), records, start, self.now)
+
+        self.assertAlmostEqual(percent, 75)
+        self.assertEqual(age, 3600)
+
+    def test_usage_at_the_moment_of_the_sync_is_already_in_the_synced_percent(self):
+        setting = self.synced_setting(40, 10)
+        at = self.now - timedelta(minutes=10)
+
+        percent, _ = token_bar.percent_since_sync(setting, [(at, 200_000)], self.now - timedelta(days=1), self.now)
+
+        self.assertEqual(percent, 40)
+
+    def test_the_synced_estimate_stops_at_100(self):
+        percent, _ = token_bar.percent_since_sync(
+            self.synced_setting(95, 60), [(self.now - timedelta(minutes=5), 200_000)], self.now - timedelta(days=1), self.now
+        )
+
+        self.assertEqual(percent, 100)
+
+    def test_there_is_no_anchor_without_a_usable_sync_in_this_window(self):
+        start = self.now - timedelta(days=1)
+        good = self.synced_setting(50, 10)
+
+        self.assertIsNone(token_bar.percent_since_sync({"limit": 1_000_000}, [], start, self.now))
+        self.assertIsNone(token_bar.percent_since_sync(None, [], start, self.now))
+        self.assertIsNone(token_bar.percent_since_sync(dict(good, limit=None), [], start, self.now))
+        self.assertIsNone(token_bar.percent_since_sync(self.synced_setting(50, 30 * 60), [], start, self.now))
+        self.assertIsNone(token_bar.percent_since_sync(self.synced_setting(50, -10), [], start, self.now))
+        for broken in ({"percent": "lots", "at": self.now.isoformat()}, {"percent": 50},
+                       {"percent": 50, "at": "garbage"}, "nope"):
+            setting = {"limit": 1_000_000, "synced": broken}
+            self.assertIsNone(token_bar.percent_since_sync(setting, [], start, self.now))
+
+    def test_calibrate_records_the_sync(self):
+        (self.projects / "session.jsonl").write_text(request_line("req_1", self.now - timedelta(minutes=5), 530_000))
+
+        token_bar.calibrate(self.home, "five_hour", "53", "2:20 PM", self.now)
+
+        synced = json.loads(token_bar.config_path(self.home).read_text())["five_hour"]["synced"]
+        self.assertEqual(synced["percent"], 53.0)
+        self.assertEqual(token_bar.parse_time(synced["at"]), self.now)
+
+    def test_a_report_after_a_sync_adds_only_the_usage_since_it(self):
+        # Synced at 50% an hour ago with a 1M limit, then 100k more tokens: 60%.
+        self.save_weekly_config(self.synced_setting(50, 60))
+        (self.projects / "session.jsonl").write_text("\n".join([
+            request_line("req_1", self.now - timedelta(hours=2), 400_000),
+            request_line("req_2", self.now - timedelta(minutes=30), 100_000),
+        ]))
+
+        text = token_bar.build_report(self.home, self.now)
+
+        self.assertIn("  60%", text)
+        self.assertIn("≈ Estimate from your sync 1h 0m ago, can be a few points off.", text)
+
+    def test_the_old_way_still_works_for_a_calibration_saved_before_syncs_were_recorded(self):
+        self.save_weekly_config({"limit": 1_000_000})
+        (self.projects / "session.jsonl").write_text(request_line("req_1", self.now - timedelta(hours=2), 300_000))
+
+        text = token_bar.build_report(self.home, self.now)
+
+        self.assertIn("  30%", text)
+        self.assertIn("≈ Estimate, can be a few points off.", text)
+        self.assertNotIn("from your sync", text)
+
+    def test_an_old_sync_says_the_estimate_may_have_drifted(self):
+        self.save_weekly_config(self.synced_setting(50, 14 * 60))
+
+        text = token_bar.build_report(self.home, self.now)
+
+        self.assertIn("≈ Estimate from your sync 14h 0m ago, so it may have drifted.", text)
+
+    def test_syncing_again_moves_the_anchor_to_the_new_percent(self):
+        self.save_weekly_config(self.synced_setting(50, 60))
+        (self.projects / "session.jsonl").write_text(request_line("req_1", datetime.now(timezone.utc) - timedelta(minutes=30), 100_000))
+
+        message, code = token_bar.main(["sync", "57"], self.home)
+        text = token_bar.build_report(self.home, datetime.now(timezone.utc))
+
+        self.assertEqual(code, 0)
+        self.assertIn("Calibrated.", message)
+        self.assertIn("  57%", text)
+        self.assertIn("sync 0 min ago", text)
 
     def save_readings(self, readings, resets):
         """Saves (minutes_ago, percent) readings the way the status line would, oldest first."""
