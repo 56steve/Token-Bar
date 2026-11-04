@@ -1,7 +1,7 @@
 ---
 name: token
 description: Show your Claude usage against your limits (5-hour and weekly, or weekly only on Ultra), when the next whole percent lands, and what is using it up. Use when the user runs /token-bar:token or asks how close they are to their Claude limit or what is eating it.
-argument-hint: [status | breakdown | sync | calibrate | statusline]
+argument-hint: [status | verdict | budget | chart | all | breakdown | sync | calibrate | statusline]
 allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py" *)
 ---
 
@@ -33,7 +33,7 @@ The script is at `${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py`. Run it as:
 
    Do the same for the weekly window with `weekly` and a time such as `Sun 5:30 AM`. Show the script's result, then run `status` again. If the user skips a window, move on and don't ask again in this session.
 
-4. If the user passes an argument, follow it: `calibrate` means step 3, `statusline` means step 2, `breakdown` means step 5, `shortcut` means step 6, and `status` or no argument means step 1.
+4. If the user passes an argument, follow it: `calibrate` means step 3, `statusline` means step 2, `breakdown` means step 5, `shortcut` means step 6, `verdict`, `budget`, `chart` (or `week`) and `all` mean step 8, and `status` or no argument means step 1.
 
 5. For `breakdown`, or when the user asks what is using up their limit, run the script with `breakdown` (add `weekly` or `five_hour` to pick a window; it picks the weekly one by itself when the account has no 5-hour limit) and show its output inside a code block, exactly as printed:
 
@@ -54,5 +54,11 @@ The script is at `${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py`. Run it as:
        python3 "${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py" sync <percent>
 
    Add `weekly` or `five_hour` to pick a window; it picks the right one by itself when the account has only a weekly limit. If it says it doesn't know the reset time yet, ask for it and use `calibrate` from step 3 once. Then run `status` again and show it as in step 1. `sync` is also the argument to use when the user runs `/token-bar:token sync`.
+
+8. The first `status` is a short summary: the bars, a one-line headline, and a `More detail:` line naming what can be opened. When the user asks for one of those, such as "show my budget", "am I on pace?" or "show the chart", run the same script with that section and show its output inside a code block, exactly as printed:
+
+       python3 "${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py" status <verdict | budget | chart | all>
+
+   `verdict` is the full pace sentence, `budget` is the per-day budget, `chart` (or `week`) is the 7-day chart, and `all` is everything at once. Don't open a section the user didn't ask for.
 
 If the shell reports `python3: command not found`, tell the user Python 3 is needed and don't try to install it yourself.
