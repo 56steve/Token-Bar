@@ -153,6 +153,166 @@ class UsageTests(unittest.TestCase):
         self.assertIn("78%", text)
         self.assertIn("Live numbers: on", text)
 
+    def save_weekly(self, percent, hours_to_reset):
+        reset = int((self.now + timedelta(hours=hours_to_reset)).timestamp())
+        token_bar.write_json(token_bar.live_path(self.home), {
+            "rate_limits": {"seven_day": {"used_percentage": percent, "resets_at": reset}},
+            "saved_at": int(self.now.timestamp()),
+        })
+
+    def test_a_weekly_only_account_is_not_asked_for_a_5_hour_limit(self):
+        self.save_weekly(30, hours_to_reset=100)
+
+        text = token_bar.build_report(self.home, self.now)
+
+        self.assertIn("Weekly  ", text)
+        self.assertNotIn("Not set up yet", text)
+        self.assertNotIn("5-hour  ", text)
+        self.assertIn("Claude reports no 5-hour limit for your account, only a weekly one.", text)
+
+    def test_a_missing_weekly_reading_is_still_asked_for(self):
+        reset = int((self.now + timedelta(hours=2)).timestamp())
+        token_bar.write_json(token_bar.live_path(self.home), {
+            "rate_limits": {"five_hour": {"used_percentage": 21, "resets_at": reset}},
+            "saved_at": int(self.now.timestamp()),
+        })
+
+        text = token_bar.build_report(self.home, self.now)
+
+        self.assertIn("Not set up yet: Weekly.", text)
+
+    def test_weekly_only_setting_hides_the_5_hour_window_without_live_numbers(self):
+        message = token_bar.main(["weekly-only"], self.home)[0]
+        (self.projects / "session.jsonl").write_text(request_line("req_1", self.now - timedelta(minutes=5), 100))
+        token_bar.calibrate(self.home, "weekly", "10", "Sun 5:30 AM", self.now)
+
+        text = token_bar.build_report(self.home, self.now)
+
+        self.assertIn("only track your weekly limit", message)
+        self.assertIn("Weekly  ", text)
+        self.assertNotIn("5-hour", text)
+        self.assertNotIn("Not set up yet", text)
+
+    def test_weekly_only_with_nothing_set_up_asks_only_for_the_weekly_limit(self):
+        token_bar.main(["weekly-only"], self.home)
+
+        text = token_bar.build_report(self.home, self.now)
+
+        self.assertTrue(text.startswith("Setup needed."))
+        self.assertIn("weekly:", text)
+        self.assertNotIn("five_hour:", text)
+
+    def test_weekly_only_can_be_turned_off_again(self):
+        token_bar.main(["weekly-only"], self.home)
+
+        message = token_bar.main(["weekly-only", "off"], self.home)[0]
+        text = token_bar.build_report(self.home, self.now)
+
+        self.assertIn("both your 5-hour and weekly", message)
+        self.assertIn("five_hour:", text)
+
+    def test_weekly_only_account_gets_a_pace_projection_for_the_week(self):
+        # 3 days into the 7-day window at 30%: 10% a day, so about 70% by the reset.
+        self.save_weekly(30, hours_to_reset=96)
+
+        text = token_bar.build_report(self.home, self.now)
+
+        self.assertIn("at your average pace this week you'll reach ~70% by the reset", text)
+
+    def test_weekly_average_pace_says_when_the_limit_comes_first(self):
+        # 2 days in at 60%: 1.25% an hour, so the last 40% takes 32 more hours, well before the reset.
+        self.save_weekly(60, hours_to_reset=120)
+
+        text = token_bar.build_report(self.home, self.now)
+
+        self.assertIn("at your average pace this week you'd hit 100% in ~1d 8h, about 3d 16h before the reset", text)
+
+    def test_weekly_average_pace_stays_quiet_right_after_a_reset(self):
+        self.assertIsNone(token_bar.average_projection_text(5, 167 * 60, 168))
+        self.assertIsNone(token_bar.average_projection_text(100, 60, 168))
+        self.assertIsNone(token_bar.average_projection_text(0, 60, 168))
+
+    def test_no_average_pace_projection_while_a_5_hour_limit_exists(self):
+        reset = int((self.now + timedelta(hours=96)).timestamp())
+        soon = int((self.now + timedelta(hours=2)).timestamp())
+        token_bar.write_json(token_bar.live_path(self.home), {
+            "rate_limits": {
+                "five_hour": {"used_percentage": 20, "resets_at": soon},
+                "seven_day": {"used_percentage": 30, "resets_at": reset},
+            },
+            "saved_at": int(self.now.timestamp()),
+        })
+
+        text = token_bar.build_report(self.home, self.now)
+
+        self.assertNotIn("average pace", text)
+        self.assertNotIn("Claude reports no 5-hour limit", text)
+
+    def test_breakdown_defaults_to_the_weekly_window_when_there_is_no_5_hour_limit(self):
+        self.save_weekly(30, hours_to_reset=100)
+        (self.projects / "session.jsonl").write_text(request_entry("req_1", self.now - timedelta(hours=1), 500, "/work/demo"))
+
+        text = token_bar.main(["breakdown"], self.home)[0]
+
+        self.assertIn("current weekly window", text)
+
+    def test_breakdown_still_defaults_to_the_5_hour_window_otherwise(self):
+        text = token_bar.main(["breakdown"], self.home)[0]
+
+        self.assertIn("current 5-hour window", text)
+
+    def test_an_estimate_says_it_is_an_estimate_and_how_to_fix_it(self):
+        (self.projects / "session.jsonl").write_text(request_line("req_1", self.now - timedelta(minutes=5), 530_000))
+        token_bar.calibrate(self.home, "five_hour", "53", "2:20 PM", self.now)
+
+        text = token_bar.build_report(self.home, self.now)
+
+        self.assertIn("Estimate only: it can be a few points off", text)
+        self.assertIn("the percent the app shows", text)
+
+    def test_live_numbers_carry_no_estimate_warning(self):
+        self.save_weekly(30, hours_to_reset=100)
+
+        self.assertNotIn("Estimate only", token_bar.build_report(self.home, self.now))
+
+    def test_sync_reuses_the_saved_reset_and_moves_the_percent(self):
+        (self.projects / "session.jsonl").write_text(request_line("req_1", self.now - timedelta(minutes=5), 610_000))
+        token_bar.main(["weekly-only"], self.home)
+        token_bar.calibrate(self.home, "weekly", "61", "Sun 5:30 AM", self.now)
+        saved = json.loads(token_bar.config_path(self.home).read_text())["weekly"]["reset_at"]
+
+        message, code = token_bar.main(["sync", "63"], self.home)
+        text = token_bar.build_report(self.home, datetime.now(timezone.utc))
+
+        self.assertEqual(code, 0)
+        self.assertIn("Calibrated. Your weekly limit", message)
+        self.assertIn("63%", text)
+        self.assertEqual(json.loads(token_bar.config_path(self.home).read_text())["weekly"]["reset_at"], saved)
+
+    def test_sync_without_a_saved_reset_asks_for_it(self):
+        (self.projects / "session.jsonl").write_text(request_line("req_1", self.now - timedelta(minutes=5), 100))
+        token_bar.main(["weekly-only"], self.home)
+
+        message, code = token_bar.main(["sync", "63"], self.home)
+
+        self.assertEqual(code, 1)
+        self.assertIn("don't know when your weekly limit resets", message)
+        self.assertIn('63 "Sun 5:30 AM"', message)
+
+    def test_sync_picks_the_window_you_name(self):
+        (self.projects / "session.jsonl").write_text(request_line("req_1", self.now - timedelta(minutes=5), 400_000))
+        token_bar.calibrate(self.home, "five_hour", "40", "2:20 PM", self.now)
+
+        message, _ = token_bar.main(["sync", "50", "five_hour"], self.home)
+
+        self.assertIn("Your 5-hour limit is about 800,000 tokens", message)
+
+    def test_sync_rejects_a_bad_percent(self):
+        message, code = token_bar.main(["sync", "lots"], self.home)
+
+        self.assertEqual(code, 1)
+        self.assertIn("is not a percentage", message)
+
     def save_readings(self, readings, resets):
         """Saves (minutes_ago, percent) readings the way the status line would, oldest first."""
         for minutes_ago, percent in readings:

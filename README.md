@@ -75,6 +75,8 @@ There is nothing to set up. Codex already writes your limits into its own sessio
 
 ## Good to know
 
+- **On Ultra, there is no 5-hour limit, only a weekly one.** With live numbers, token-bar sees that Claude reports no 5-hour window and simply shows the weekly bar, with where your average pace this week would end up. Without live numbers, tell the agent you're on Ultra (or run `token_bar.py weekly-only`) and it will only ask about the weekly limit. Run `weekly-only off` to undo it.
+- **The desktop app shows an estimate, and you can sync it in one step.** Live numbers come from Claude Code's status line, which runs in a terminal and not in the Claude desktop app. In the desktop app, token-bar estimates from your session logs, which can be a few points off because Claude also counts usage the logs can't see. Tell the agent the percent the app shows ("the app says 63%"), or run `token_bar.py sync 63`, and it re-syncs to that number and keeps your saved reset time.
 - **Live Claude numbers need a Claude.ai Pro or Max account.** Claude only reports your limits to the status line on those accounts. API-key users get the estimate instead.
 - **Readings update while you use the tool.** token-bar shows how old each reading is, and it skips the next-point estimate when a reading is old.
 - **Codex reports whole percents,** so its next-point estimate is approximate.
