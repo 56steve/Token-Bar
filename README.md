@@ -24,8 +24,6 @@ Ask for more and it opens the details: the pace verdict, a daily budget, and a 7
 
 ![The full answer: the weekly bar, an On track verdict, a daily budget, and a bar chart of the last 7 days](assets/details.png)
 
-*Both screenshots use made-up sample data.*
-
 ## Install
 
 ### Claude Code
