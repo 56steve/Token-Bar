@@ -29,6 +29,11 @@ LOOKBACK_MINUTES = 60
 PROJECTION_MAX_HOURS = 6
 # A weekly pace needs this much of the week behind it before it says anything useful.
 AVERAGE_PACE_MIN_HOURS = 12
+CHART_DAYS = 7
+CHART_LABEL_WIDTH = 7
+CHART_BAR_WIDTH = 14
+# Finishing the window below this percent counts as on track, at or above it as tight.
+ON_TRACK_BELOW_PERCENT = 85
 WARN_LEVELS = (80, 90)
 SHORTCUT_MARKER = "<!-- installed by token-bar -->"
 HISTORY_KEEP_SECONDS = 3 * 3600
@@ -302,12 +307,24 @@ def projection_text(percent, rate, minutes_to_reset):
     return f"at this pace you'll reach ~{round(percent + rate * minutes_to_reset)}% by the reset"
 
 
-def average_projection_text(percent, minutes_to_reset, window_hours):
-    """Where the average pace so far this window ends up, for a window that lasts days.
+def local_time_text(when):
+    """A time in the user's own timezone, such as 'Sun 5:30 AM'."""
+    local = when.astimezone()
+    return f"{local.strftime('%a')} {local.hour % 12 or 12}:{local.minute:02d} {'AM' if local.hour < 12 else 'PM'}"
 
-    Used when the weekly limit is the only limit, since the short-pace projection stays quiet
-    for windows that reset more than PROJECTION_MAX_HOURS away. Needs some of the window to
-    have passed, so it says nothing right after a reset.
+
+def format_percent(value):
+    """A percent with a decimal only when it is small, so 17.5 reads '18' and 5.25 reads '5.3'."""
+    return f"{value:.0f}" if value >= 10 else f"{value:.1f}".rstrip("0").rstrip(".")
+
+
+def pace_verdict(percent, minutes_to_reset, window_hours, now):
+    """A verdict on the average pace so far this window, as (headline, full sentence).
+
+    Says whether you are on track, tight or using it too fast, in plain words. Used when the
+    weekly limit is the only limit, since the short-pace projection stays quiet for windows
+    that reset more than PROJECTION_MAX_HOURS away. Needs some of the window to have passed,
+    so it says nothing right after a reset. None when it can't be told.
     """
     if minutes_to_reset is None or minutes_to_reset <= 0 or not 0 < percent < 100:
         return None
@@ -318,8 +335,68 @@ def average_projection_text(percent, minutes_to_reset, window_hours):
     minutes_to_full = (100 - percent) / rate
     if minutes_to_full < minutes_to_reset:
         gap = format_remaining((minutes_to_reset - minutes_to_full) * 60)
-        return f"at your average pace this week you'd hit 100% in ~{format_remaining(minutes_to_full * 60)}, about {gap} before the reset"
-    return f"at your average pace this week you'll reach ~{round(percent + rate * minutes_to_reset)}% by the reset"
+        lockout = local_time_text(now + timedelta(minutes=minutes_to_full))
+        headline = "⚠ Using it too fast"
+        return headline, f"{headline}. At this rate you run out ~{lockout}, {gap} before the reset."
+    finish = round(percent + rate * minutes_to_reset)
+    headline = "✓ On track" if finish < ON_TRACK_BELOW_PERCENT else "◐ Tight"
+    return headline, f"{headline}. You'll finish the week near {finish}%."
+
+
+def average_projection_text(percent, minutes_to_reset, window_hours, now):
+    """The full sentence of pace_verdict, or None."""
+    verdict = pace_verdict(percent, minutes_to_reset, window_hours, now)
+    return verdict[1] if verdict else None
+
+
+def activity_chart(records, now):
+    """One bar per day for the last week, longest for the busiest day, with the tokens beside it.
+
+    Drawn with the same full-height bar characters as the usage bar, because partial blocks
+    render at the same height in some fonts. Built from the Claude Code session logs, so it
+    shows the shape of your week and not exact usage. Days are local calendar days, with today
+    last. None when there is nothing to show.
+    """
+    today = now.astimezone().date()
+    days = [today - timedelta(days=ago) for ago in range(CHART_DAYS - 1, -1, -1)]
+    totals = dict.fromkeys(days, 0)
+    for when, tokens in records:
+        day = when.astimezone().date()
+        if day in totals:
+            totals[day] += tokens
+    busiest = max(totals.values())
+    if busiest <= 0:
+        return None
+
+    lines = ["Activity · last 7 days"]
+    for day in days:
+        tokens = totals[day]
+        label = "Today" if day == today else day.strftime("%a")
+        # Any use shows at least one block, so a light day never looks like an empty one.
+        filled = max(1, round(tokens / busiest * CHART_BAR_WIDTH)) if tokens > 0 else 0
+        bar = "█" * filled + "░" * (CHART_BAR_WIDTH - filled)
+        lines.append(f"{label:<{CHART_LABEL_WIDTH}}{bar}  {format_tokens(tokens)}")
+    return "\n".join(lines)
+
+
+def budget_text(percent, minutes_to_reset, used_today=None):
+    """How much of the limit you can use each day and still last until the reset.
+
+    used_today is the percent used since midnight when it can be told, else None. Says nothing
+    once the limit is reached or the window has reset.
+    """
+    if minutes_to_reset is None or minutes_to_reset <= 0 or percent >= 100:
+        return None
+    remaining = 100 - percent
+    days_left = minutes_to_reset / 1440
+    if days_left < 1:
+        return f"Budget: ~{format_percent(remaining)}% left for the last {format_remaining(minutes_to_reset * 60)}."
+    per_day = remaining / days_left
+    text = f"Budget: ~{format_percent(per_day)}% a day."
+    if used_today is not None:
+        text += f" Today: {format_percent(used_today)}%"
+        text += ", over budget." if used_today > per_day else "."
+    return text
 
 
 def minutes_to_next_percent(series, now):
@@ -351,7 +428,7 @@ def estimate_text(minutes):
     return "~" + format_remaining(minutes * 60)
 
 
-def render_block(label, width, percent, nxt, minutes, idle, resets_in, projection=None):
+def render_block(label, width, percent, nxt, minutes, idle, resets_in, projection=None, budget=None):
     """One limit as a bar, with the next point on the same line and the reset time under it."""
     head = f"{label:<{width + 2}}{usage_bar(percent)}  {math.floor(percent)}%"
     if percent >= 100:
@@ -365,10 +442,24 @@ def render_block(label, width, percent, nxt, minutes, idle, resets_in, projectio
         lines.append(f"{' ' * (width + 2)}resets in {resets_in}")
     if projection:
         lines.append(f"{' ' * (width + 2)}{projection}")
+    if budget:
+        lines.append(f"{' ' * (width + 2)}{budget}")
     return "\n".join(lines)
 
 
-def build_report(home, now):
+SECTIONS = ("summary", "verdict", "budget", "chart", "all")
+SECTION_ALIASES = {"week": "chart"}
+
+
+def build_report(home, now, section="summary"):
+    """The report. The summary is the bars with a one-line headline; a section opens one detail.
+
+    section is one of SECTIONS (or an alias): "verdict", "budget" and "chart" add that detail
+    under the bars, and "all" adds everything.
+    """
+    section = SECTION_ALIASES.get(section, section)
+    if section not in SECTIONS:
+        raise ValueError(f"'{section}' is not a section. Choose from: {', '.join(SECTIONS[1:])}")
     config = read_json(config_path(home)) or {}
     live = read_live(home)
     readings = live.get("rate_limits") or {}
@@ -427,14 +518,36 @@ def build_report(home, now):
         resets_in = format_remaining((resets_at - now).total_seconds()) if resets_at else None
         minutes_to_reset = (resets_at - now).total_seconds() / 60 if resets_at else None
         projection = projection_text(percent, rate, minutes_to_reset)
+        headline = None
         if projection is None and key == "weekly" and "five_hour" not in shown:
-            projection = average_projection_text(percent, minutes_to_reset, window["hours"])
-        entries.append((window["label"], percent, nxt, minutes, idle, resets_in, projection))
+            verdict = pace_verdict(percent, minutes_to_reset, window["hours"], now)
+            if verdict:
+                headline, projection = verdict
+        budget = None
+        if key == "weekly":
+            used_today = None
+            if limit:
+                midnight = now.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+                since = max(midnight.astimezone(timezone.utc), start)
+                used_today = sum(tokens for when, tokens in records if since <= when <= now) / limit * 100
+            budget = budget_text(percent, minutes_to_reset, used_today)
+        entries.append((window["label"], percent, nxt, minutes, idle, resets_in, projection, budget, headline))
         shown.add(key)
 
     live_on = "on" if readings else "off"
     width = max((len(entry[0]) for entry in entries), default=0)
-    blocks = [render_block(label, width, *rest) for label, *rest in entries]
+    blocks = []
+    for label, percent, nxt, minutes, idle, resets_in, projection, budget, headline in entries:
+        if section in ("verdict", "all"):
+            line = projection
+        elif section == "summary":
+            line = headline or projection  # a short headline where there is a longer verdict to open
+        else:
+            line = None
+        blocks.append(render_block(
+            label, width, percent, nxt, minutes, idle, resets_in, line,
+            budget if section in ("budget", "all") else None,
+        ))
     if not blocks:
         lines = ["Setup needed. Ask the user for each of these, then run calibrate:"]
         for key in missing:
@@ -444,16 +557,29 @@ def build_report(home, now):
         return "\n".join(lines) + shortcut_hint(home)
 
     text = "\n\n".join(blocks)
+    chart = activity_chart(records or [], now)
+    if section in ("chart", "all") and chart:
+        text += "\n\n" + chart
+    available = {
+        "verdict": any(entry[6] for entry in entries),
+        "budget": any(entry[7] for entry in entries),
+        "chart": bool(chart),
+    }
+    if section == "summary":
+        # Only list what the summary is hiding: a verdict is hidden only when it was cut to a headline.
+        hidden = dict(available, verdict=any(entry[8] for entry in entries))
+        names = [name for name, there in hidden.items() if there]
+        if names:
+            text += f"\n\nMore detail: {' · '.join(names)} · all"
+    elif section != "all" and not available[section]:
+        text += f"\n\nNo {section} to show yet."
     distinct = set(sources.values())
     if len(distinct) == 1:
         text += f"\n\nSource: {distinct.pop()}"
     else:
         text += "\n\nSource: " + "; ".join(f"{name}: {how}" for name, how in sources.items())
     if estimated:
-        text += (
-            "\n\nEstimate only: it can be a few points off, because Claude also counts usage "
-            "token-bar can't see (claude.ai, the app). Tell me the percent the app shows and I'll sync to it."
-        )
+        text += "\n\n≈ Estimate, can be a few points off. Tell me the % your app shows and I'll sync to it."
     if no_five_hour_reported:
         text += "\n\nClaude reports no 5-hour limit for your account, only a weekly one."
     if missing:
@@ -616,8 +742,7 @@ def calibrate(home, key, percent_text, reset_text, now):
     limit = round(used / (percent / 100))
     config[key] = {"limit": limit, "reset_at": anchor.isoformat()}
     write_json(config_path(home), config)
-    local_reset = anchor.astimezone().strftime("%a %I:%M %p").lstrip("0")
-    return f"Calibrated. Your {window['label'].lower()} limit is about {limit:,} tokens, resetting {local_reset}."
+    return f"Calibrated. Your {window['label'].lower()} limit is about {limit:,} tokens, resetting {local_time_text(anchor)}."
 
 
 def set_weekly_only(home, enabled):
@@ -707,7 +832,7 @@ def shortcut_hint(home):
 SHORTCUT_SKILL = f"""---
 name: token
 description: Show your Claude usage against your limits (5-hour and weekly, or weekly only on Ultra), when the next whole percent lands, and what is using it up. Use when the user runs /token or asks how close they are to their Claude limit.
-argument-hint: [status | breakdown | calibrate | statusline]
+argument-hint: [status | verdict | budget | chart | all | breakdown | sync | calibrate | statusline]
 ---
 
 This is a shortcut for the token-bar plugin. Call the Skill tool with skill `token-bar:token` and args `$ARGUMENTS`, then follow that skill's instructions exactly.
@@ -769,7 +894,8 @@ def main(argv, home, stdin_text=None, script_path=None):
     """Runs one command. Returns (text to print, exit code)."""
     parser = argparse.ArgumentParser(prog="token_bar.py")
     commands = parser.add_subparsers(dest="command")
-    commands.add_parser("status")
+    status = commands.add_parser("status")
+    status.add_argument("section", nargs="?", default="summary", choices=[*SECTIONS, *SECTION_ALIASES])
     cal = commands.add_parser("calibrate")
     cal.add_argument("window", choices=sorted(WINDOWS))
     cal.add_argument("percent")
@@ -790,7 +916,7 @@ def main(argv, home, stdin_text=None, script_path=None):
     now = datetime.now(timezone.utc)
     try:
         if args.command in (None, "status"):
-            return build_report(home, now), 0
+            return build_report(home, now, getattr(args, "section", "summary")), 0
         if args.command == "warn":
             return warning_output(home, now), 0
         if args.command == "install-shortcut":

@@ -215,22 +215,211 @@ class UsageTests(unittest.TestCase):
         # 3 days into the 7-day window at 30%: 10% a day, so about 70% by the reset.
         self.save_weekly(30, hours_to_reset=96)
 
-        text = token_bar.build_report(self.home, self.now)
+        text = token_bar.build_report(self.home, self.now, "verdict")
 
-        self.assertIn("at your average pace this week you'll reach ~70% by the reset", text)
+        self.assertIn("✓ On track. You'll finish the week near 70%.", text)
+
+    def test_a_pace_that_ends_close_to_the_limit_is_called_tight(self):
+        # 3 days in at 40%: 0.56% an hour, so about 93% by the reset.
+        self.save_weekly(40, hours_to_reset=96)
+
+        text = token_bar.build_report(self.home, self.now, "verdict")
+
+        self.assertIn("◐ Tight. You'll finish the week near 93%.", text)
 
     def test_weekly_average_pace_says_when_the_limit_comes_first(self):
         # 2 days in at 60%: 1.25% an hour, so the last 40% takes 32 more hours, well before the reset.
         self.save_weekly(60, hours_to_reset=120)
 
-        text = token_bar.build_report(self.home, self.now)
+        text = token_bar.build_report(self.home, self.now, "verdict")
 
-        self.assertIn("at your average pace this week you'd hit 100% in ~1d 8h, about 3d 16h before the reset", text)
+        self.assertRegex(
+            text,
+            r"⚠ Using it too fast\. At this rate you run out ~\w{3} \d{1,2}:\d{2} [AP]M, 3d 16h before the reset\.",
+        )
 
     def test_weekly_average_pace_stays_quiet_right_after_a_reset(self):
-        self.assertIsNone(token_bar.average_projection_text(5, 167 * 60, 168))
-        self.assertIsNone(token_bar.average_projection_text(100, 60, 168))
-        self.assertIsNone(token_bar.average_projection_text(0, 60, 168))
+        self.assertIsNone(token_bar.average_projection_text(5, 167 * 60, 168, self.now))
+        self.assertIsNone(token_bar.average_projection_text(100, 60, 168, self.now))
+        self.assertIsNone(token_bar.average_projection_text(0, 60, 168, self.now))
+
+    def test_the_report_shows_a_daily_budget_for_the_week(self):
+        # 30% used and 4 days left: 70% spread over 4 days is 17.5% a day.
+        self.save_weekly(30, hours_to_reset=96)
+
+        text = token_bar.build_report(self.home, self.now, "budget")
+
+        self.assertIn("Budget: ~18% a day.", text)
+
+    def test_the_weekly_block_is_the_bar_then_the_reset_then_the_verdict_then_the_budget(self):
+        self.save_weekly(30, hours_to_reset=96)
+
+        lines = token_bar.build_report(self.home, self.now, "all").splitlines()
+
+        self.assertEqual(lines[0], "Weekly  " + "█" * 6 + "░" * 14 + "  30%")
+        self.assertEqual(lines[1], "        resets in 4d 0h")
+        self.assertTrue(lines[2].startswith("        ✓ On track"))
+        self.assertTrue(lines[3].startswith("        Budget: ~18% a day."))
+
+    def test_the_budget_counts_down_the_hours_on_the_last_day(self):
+        self.assertEqual(
+            token_bar.budget_text(30, 10 * 60),
+            "Budget: ~70% left for the last 10h 0m.",
+        )
+
+    def test_the_budget_says_how_much_was_used_today_and_when_it_is_over(self):
+        self.assertEqual(
+            token_bar.budget_text(30, 96 * 60, used_today=5),
+            "Budget: ~18% a day. Today: 5%.",
+        )
+        self.assertEqual(
+            token_bar.budget_text(30, 96 * 60, used_today=25),
+            "Budget: ~18% a day. Today: 25%, over budget.",
+        )
+
+    def test_the_budget_stays_quiet_when_the_limit_is_reached_or_the_window_reset(self):
+        self.assertIsNone(token_bar.budget_text(100, 96 * 60))
+        self.assertIsNone(token_bar.budget_text(30, 0))
+        self.assertIsNone(token_bar.budget_text(30, None))
+
+    def tokens_on(self, days_ago, tokens):
+        """A (time, tokens) record at noon, local time, the given number of days before today."""
+        day = self.now.astimezone().date() - timedelta(days=days_ago)
+        return datetime.combine(day, datetime.min.time()).replace(hour=12).astimezone().astimezone(timezone.utc), tokens
+
+    def test_the_activity_chart_has_one_bar_per_day_with_the_busiest_longest(self):
+        # Oldest to newest: 100k, 800k, 400k, none, 200k, 800k, 50k (today).
+        records = [self.tokens_on(6, 100_000), self.tokens_on(5, 800_000), self.tokens_on(4, 400_000),
+                   self.tokens_on(2, 200_000), self.tokens_on(1, 800_000), self.tokens_on(0, 50_000)]
+
+        lines = token_bar.activity_chart(records, self.now).splitlines()
+
+        self.assertEqual(lines[0], "Activity · last 7 days")
+        self.assertEqual(len(lines), 8)
+        filled = [line.count("█") for line in lines[1:]]
+        self.assertEqual(filled, [2, 14, 7, 0, 4, 14, 1])
+        self.assertTrue(lines[-1].startswith("Today"))
+        self.assertTrue(lines[-1].endswith("█░░░░░░░░░░░░░  50k"))
+        self.assertTrue(lines[2].endswith("800k"))
+        self.assertTrue(lines[4].endswith("░░░░░░░░░░░░░░  0"))
+
+    def test_any_use_shows_at_least_one_block(self):
+        records = [self.tokens_on(1, 1_000_000), self.tokens_on(0, 1)]
+
+        lines = token_bar.activity_chart(records, self.now).splitlines()
+
+        self.assertEqual([line.count("█") for line in lines[-2:]], [14, 1])
+
+    def test_the_activity_chart_ignores_days_outside_the_week_and_says_nothing_without_usage(self):
+        self.assertIsNone(token_bar.activity_chart([], self.now))
+        self.assertIsNone(token_bar.activity_chart([self.tokens_on(9, 500)], self.now))
+
+    def test_the_report_ends_with_the_activity_chart_when_there_is_usage(self):
+        self.save_weekly(30, hours_to_reset=100)
+        (self.projects / "session.jsonl").write_text(request_line("req_1", self.now - timedelta(minutes=2), 500))
+
+        text = token_bar.build_report(self.home, self.now, "all")
+
+        self.assertIn("Activity · last 7 days", text)
+        self.assertLess(text.index("Budget"), text.index("Activity"))
+        self.assertLess(text.index("Activity"), text.index("Source:"))
+
+    def usage_in_the_logs(self):
+        (self.projects / "session.jsonl").write_text(request_line("req_1", self.now - timedelta(minutes=2), 500))
+
+    def test_the_summary_is_the_bar_a_headline_and_what_can_be_opened(self):
+        self.save_weekly(30, hours_to_reset=96)
+        self.usage_in_the_logs()
+
+        lines = token_bar.build_report(self.home, self.now).splitlines()
+
+        self.assertEqual(lines[0], "Weekly  " + "█" * 6 + "░" * 14 + "  30%")
+        self.assertEqual(lines[1], "        resets in 4d 0h")
+        self.assertEqual(lines[2], "        ✓ On track")
+        text = "\n".join(lines)
+        self.assertIn("More detail: verdict · budget · chart · all", text)
+        self.assertNotIn("Budget:", text)
+        self.assertNotIn("Activity", text)
+        self.assertNotIn("You'll finish", text)
+
+    def test_each_section_opens_only_its_own_detail(self):
+        self.save_weekly(30, hours_to_reset=96)
+        self.usage_in_the_logs()
+
+        verdict = token_bar.build_report(self.home, self.now, "verdict")
+        budget = token_bar.build_report(self.home, self.now, "budget")
+        chart = token_bar.build_report(self.home, self.now, "chart")
+
+        self.assertIn("✓ On track. You'll finish the week near 70%.", verdict)
+        self.assertNotIn("Budget:", verdict + chart)
+        self.assertIn("Budget: ~18% a day.", budget)
+        self.assertNotIn("You'll finish", budget + chart)
+        self.assertIn("Activity · last 7 days", chart)
+        self.assertNotIn("Activity", verdict + budget)
+        for text in (verdict, budget, chart):
+            self.assertIn("Weekly  ", text)
+            self.assertNotIn("More detail", text)
+
+    def test_week_is_another_name_for_the_chart(self):
+        self.save_weekly(30, hours_to_reset=96)
+        self.usage_in_the_logs()
+
+        self.assertEqual(
+            token_bar.build_report(self.home, self.now, "week"),
+            token_bar.build_report(self.home, self.now, "chart"),
+        )
+
+    def test_all_shows_everything(self):
+        self.save_weekly(30, hours_to_reset=96)
+        self.usage_in_the_logs()
+
+        text = token_bar.build_report(self.home, self.now, "all")
+
+        for part in ("On track. You'll finish", "Budget: ~18% a day.", "Activity · last 7 days"):
+            self.assertIn(part, text)
+        self.assertNotIn("More detail", text)
+
+    def test_a_section_with_nothing_to_show_says_so(self):
+        reset = int((self.now + timedelta(hours=2)).timestamp())
+        token_bar.write_json(token_bar.live_path(self.home), {
+            "rate_limits": {"five_hour": {"used_percentage": 21, "resets_at": reset}},
+            "saved_at": int(self.now.timestamp()),
+        })
+
+        self.assertIn("No budget to show yet.", token_bar.build_report(self.home, self.now, "budget"))
+        self.assertNotIn("More detail", token_bar.build_report(self.home, self.now))
+
+    def test_the_status_command_takes_a_section_and_rejects_a_bad_one(self):
+        self.save_weekly(30, hours_to_reset=96)
+
+        text, code = token_bar.main(["status", "budget"], self.home)
+        self.assertEqual(code, 0)
+        self.assertIn("Budget: ~18% a day.", text)
+        with self.assertRaises(SystemExit):
+            token_bar.main(["status", "nonsense"], self.home)
+        with self.assertRaises(ValueError):
+            token_bar.build_report(self.home, self.now, "nonsense")
+
+    def test_percents_get_a_decimal_only_when_small(self):
+        self.assertEqual(token_bar.format_percent(17.5), "18")
+        self.assertEqual(token_bar.format_percent(5.25), "5.2")
+        self.assertEqual(token_bar.format_percent(5.0), "5")
+
+    def test_there_is_no_budget_for_the_5_hour_window(self):
+        reset = int((self.now + timedelta(hours=2)).timestamp())
+        token_bar.write_json(token_bar.live_path(self.home), {
+            "rate_limits": {"five_hour": {"used_percentage": 21, "resets_at": reset}},
+            "saved_at": int(self.now.timestamp()),
+        })
+
+        self.assertNotIn("Budget", token_bar.build_report(self.home, self.now))
+
+    def test_times_read_naturally_in_the_local_timezone(self):
+        when = datetime(2026, 11, 8, 0, 0, tzinfo=timezone.utc).astimezone().replace(hour=5, minute=30)
+
+        self.assertEqual(token_bar.local_time_text(when), "Sun 5:30 AM")
+        self.assertEqual(token_bar.local_time_text(when.replace(hour=17, minute=5)), "Sun 5:05 PM")
+        self.assertEqual(token_bar.local_time_text(when.replace(hour=0, minute=0)), "Sun 12:00 AM")
 
     def test_no_average_pace_projection_while_a_5_hour_limit_exists(self):
         reset = int((self.now + timedelta(hours=96)).timestamp())
@@ -245,7 +434,8 @@ class UsageTests(unittest.TestCase):
 
         text = token_bar.build_report(self.home, self.now)
 
-        self.assertNotIn("average pace", text)
+        for verdict in ("On track", "Tight", "Using it too fast"):
+            self.assertNotIn(verdict, text)
         self.assertNotIn("Claude reports no 5-hour limit", text)
 
     def test_breakdown_defaults_to_the_weekly_window_when_there_is_no_5_hour_limit(self):
@@ -267,13 +457,13 @@ class UsageTests(unittest.TestCase):
 
         text = token_bar.build_report(self.home, self.now)
 
-        self.assertIn("Estimate only: it can be a few points off", text)
-        self.assertIn("the percent the app shows", text)
+        self.assertIn("≈ Estimate, can be a few points off", text)
+        self.assertIn("the % your app shows", text)
 
     def test_live_numbers_carry_no_estimate_warning(self):
         self.save_weekly(30, hours_to_reset=100)
 
-        self.assertNotIn("Estimate only", token_bar.build_report(self.home, self.now))
+        self.assertNotIn("Estimate", token_bar.build_report(self.home, self.now))
 
     def test_sync_reuses_the_saved_reset_and_moves_the_percent(self):
         (self.projects / "session.jsonl").write_text(request_line("req_1", self.now - timedelta(minutes=5), 610_000))

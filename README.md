@@ -14,6 +14,18 @@ It makes no network calls and needs no account.
 ![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757)
 ![Codex plugin](https://img.shields.io/badge/Codex-plugin-10a37f)
 
+## What it looks like
+
+The first answer is short: the bar, when it resets, and a one-line headline.
+
+![The short answer from /token-bar:token: a weekly usage bar at 40%, resets in 3d 3h, and an On track headline](assets/summary.png)
+
+Ask for more and it opens the details: the pace verdict, a daily budget, and a 7-day chart.
+
+![The full answer: the weekly bar, an On track verdict, a daily budget, and a bar chart of the last 7 days](assets/details.png)
+
+*Both screenshots use made-up sample data.*
+
 ## Install
 
 ### Claude Code
@@ -63,6 +75,10 @@ There is nothing to set up. Codex already writes your limits into its own sessio
 ## More than a percent
 
 - **Will you make it to the reset?** Under the reset time, token-bar says whether your current pace reaches the limit first, for example "at this pace you'd hit 100% in ~1h 5m, about 35 min before the reset", or where you'll end up, such as "you'll reach ~41% by the reset". It only shows this for windows that reset within 6 hours, because a pace measured over an hour says little about a window that lasts days.
+- **Short by default, details on request.** The first answer is just the bars with a one-line headline. A `More detail` line lists what you can open, and you ask for it in plain words ("show my budget", "show the chart") or with `/token-bar:token budget`, `verdict`, `chart` or `all`.
+- **Are you on pace?** For the weekly limit, a one-line verdict sits under the bar: "✓ On track", "◐ Tight", or "⚠ Using it too fast", with the time you'd run out.
+- **How much can you use per day?** A one-line budget turns what's left into a daily number, for example "Budget: ~18% a day. Today: 25%, over budget." It says how much you've used today when it knows. On the last day it counts the hours left instead.
+- **Which days were heavy?** One bar per day for the last 7 days, longest for your busiest day, with the tokens beside it. An empty bar is a day with no use. It's built from your Claude Code logs, so it shows the shape of your week, not exact usage.
 - **What's using your limit?** Run `/token-bar:token breakdown` in Claude Code, or ask Codex "what is using my Codex limit?". You get the share of tokens by project and by model. In Claude Code it also splits out what your subagents used. These are shares of the tokens counted from the logs, not exact shares of your limit, because the tools weigh tokens in ways the logs don't show.
 - **A heads-up before you hit the wall (Claude Code, with live numbers).** A small hook tells you once when a window first crosses 80% and again at 90%, and stays quiet otherwise. Set `TOKEN_BAR_NO_WARN=1` to turn it off. This one is new: its logic is tested, but it hasn't been seen in a live Claude Code session yet.
 
