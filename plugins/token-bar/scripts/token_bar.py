@@ -27,6 +27,8 @@ LEVEL_COLORS = ((90, "\033[31m"), (70, "\033[33m"), (0, "\033[32m"))
 FRESH_MINUTES = 30
 LOOKBACK_MINUTES = 60
 PROJECTION_MAX_HOURS = 6
+# A weekly pace needs this much of the week behind it before it says anything useful.
+AVERAGE_PACE_MIN_HOURS = 12
 WARN_LEVELS = (80, 90)
 SHORTCUT_MARKER = "<!-- installed by token-bar -->"
 HISTORY_KEEP_SECONDS = 3 * 3600
@@ -300,6 +302,26 @@ def projection_text(percent, rate, minutes_to_reset):
     return f"at this pace you'll reach ~{round(percent + rate * minutes_to_reset)}% by the reset"
 
 
+def average_projection_text(percent, minutes_to_reset, window_hours):
+    """Where the average pace so far this window ends up, for a window that lasts days.
+
+    Used when the weekly limit is the only limit, since the short-pace projection stays quiet
+    for windows that reset more than PROJECTION_MAX_HOURS away. Needs some of the window to
+    have passed, so it says nothing right after a reset.
+    """
+    if minutes_to_reset is None or minutes_to_reset <= 0 or not 0 < percent < 100:
+        return None
+    elapsed = window_hours * 60 - minutes_to_reset
+    if elapsed < AVERAGE_PACE_MIN_HOURS * 60:
+        return None
+    rate = percent / elapsed
+    minutes_to_full = (100 - percent) / rate
+    if minutes_to_full < minutes_to_reset:
+        gap = format_remaining((minutes_to_reset - minutes_to_full) * 60)
+        return f"at your average pace this week you'd hit 100% in ~{format_remaining(minutes_to_full * 60)}, about {gap} before the reset"
+    return f"at your average pace this week you'll reach ~{round(percent + rate * minutes_to_reset)}% by the reset"
+
+
 def minutes_to_next_percent(series, now):
     """Minutes until the percent next goes up, from how fast it moved in the last hour.
 
@@ -352,12 +374,20 @@ def build_report(home, now):
     readings = live.get("rate_limits") or {}
     records = None
 
-    entries, sources, missing = [], {}, []
+    entries, sources, missing, shown = [], {}, [], set()
+    weekly_only = bool(config.get("weekly_only"))
+    no_five_hour_reported = False
     for key, window in WINDOWS.items():
+        if key == "five_hour" and weekly_only:
+            continue
         setting = config.get(key)
         reading = readings.get(window["live"])
         if not setting and not reading:
-            missing.append(key)
+            if key == "five_hour" and readings.get(WINDOWS["weekly"]["live"]):
+                # Claude reports a weekly limit but no 5-hour one, as on Ultra. Not something to set up.
+                no_five_hour_reported = True
+            else:
+                missing.append(key)
             continue
         if records is None:
             records = scan_usage(home / ".claude" / "projects", now - timedelta(days=PROJECTS_DAYS))
@@ -395,7 +425,10 @@ def build_report(home, now):
         resets_in = format_remaining((resets_at - now).total_seconds()) if resets_at else None
         minutes_to_reset = (resets_at - now).total_seconds() / 60 if resets_at else None
         projection = projection_text(percent, rate, minutes_to_reset)
+        if projection is None and key == "weekly" and "five_hour" not in shown:
+            projection = average_projection_text(percent, minutes_to_reset, window["hours"])
         entries.append((window["label"], percent, nxt, minutes, idle, resets_in, projection))
+        shown.add(key)
 
     live_on = "on" if readings else "off"
     width = max((len(entry[0]) for entry in entries), default=0)
@@ -414,6 +447,8 @@ def build_report(home, now):
         text += f"\n\nSource: {distinct.pop()}"
     else:
         text += "\n\nSource: " + "; ".join(f"{name}: {how}" for name, how in sources.items())
+    if no_five_hour_reported:
+        text += "\n\nClaude reports no 5-hour limit for your account, only a weekly one."
     if missing:
         names = ", ".join(WINDOWS[key]["label"] for key in missing)
         text += f"\n\nNot set up yet: {names}. Ask the user for its percent and reset time to add it."
@@ -568,6 +603,29 @@ def calibrate(home, key, percent_text, reset_text, now):
     return f"Calibrated. Your {window['label'].lower()} limit is about {limit:,} tokens, resetting {local_reset}."
 
 
+def set_weekly_only(home, enabled):
+    """Remembers that the account has no 5-hour limit, so it is never asked about or shown."""
+    config = read_json(config_path(home)) or {}
+    if enabled:
+        config["weekly_only"] = True
+    else:
+        config.pop("weekly_only", None)
+    write_json(config_path(home), config)
+    if enabled:
+        return "Got it. token-bar will only track your weekly limit."
+    return "token-bar will track both your 5-hour and weekly limits again."
+
+
+def default_breakdown_window(home):
+    """The weekly window when the account has no 5-hour limit, otherwise the 5-hour window."""
+    if (read_json(config_path(home)) or {}).get("weekly_only"):
+        return "weekly"
+    readings = read_live(home).get("rate_limits") or {}
+    if readings.get(WINDOWS["weekly"]["live"]) and not readings.get(WINDOWS["five_hour"]["live"]):
+        return "weekly"
+    return "five_hour"
+
+
 def level_color(percent):
     """Green below 70%, yellow from 70%, red from 90%."""
     for threshold, code in LEVEL_COLORS:
@@ -631,7 +689,7 @@ def shortcut_hint(home):
 
 SHORTCUT_SKILL = f"""---
 name: token
-description: Show your Claude usage against your 5-hour and weekly limits, when the next whole percent lands, and what is using it up. Use when the user runs /token or asks how close they are to their Claude limit.
+description: Show your Claude usage against your limits (5-hour and weekly, or weekly only on Ultra), when the next whole percent lands, and what is using it up. Use when the user runs /token or asks how close they are to their Claude limit.
 argument-hint: [status | breakdown | calibrate | statusline]
 ---
 
@@ -704,7 +762,9 @@ def main(argv, home, stdin_text=None, script_path=None):
     commands.add_parser("warn")
     commands.add_parser("install-shortcut")
     breakdown = commands.add_parser("breakdown")
-    breakdown.add_argument("window", nargs="?", choices=sorted(WINDOWS), default="five_hour")
+    breakdown.add_argument("window", nargs="?", choices=sorted(WINDOWS))
+    weekly_only = commands.add_parser("weekly-only")
+    weekly_only.add_argument("setting", nargs="?", choices=("on", "off"), default="on")
     args = parser.parse_args(argv)
 
     now = datetime.now(timezone.utc)
@@ -721,10 +781,13 @@ def main(argv, home, stdin_text=None, script_path=None):
                 "kept": "You already have your own /token skill, so it was left as it is.",
             }
             return messages[result], code
+        if args.command == "weekly-only":
+            return set_weekly_only(home, args.setting == "on"), 0
         if args.command == "breakdown":
-            start = window_bounds(home, args.window, now)
+            window = args.window or default_breakdown_window(home)
+            start = window_bounds(home, window, now)
             requests = [r for r in scan_requests(home / ".claude" / "projects", start) if r["when"] <= now]
-            return breakdown_text(requests, WINDOWS[args.window]["label"].lower()), 0
+            return breakdown_text(requests, WINDOWS[window]["label"].lower()), 0
         if args.command == "calibrate":
             return calibrate(home, args.window, args.percent, " ".join(args.reset), now), 0
         if args.command == "statusline":
