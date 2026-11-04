@@ -261,6 +261,58 @@ class UsageTests(unittest.TestCase):
 
         self.assertIn("current 5-hour window", text)
 
+    def test_an_estimate_says_it_is_an_estimate_and_how_to_fix_it(self):
+        (self.projects / "session.jsonl").write_text(request_line("req_1", self.now - timedelta(minutes=5), 530_000))
+        token_bar.calibrate(self.home, "five_hour", "53", "2:20 PM", self.now)
+
+        text = token_bar.build_report(self.home, self.now)
+
+        self.assertIn("Estimate only: it can be a few points off", text)
+        self.assertIn("the percent the app shows", text)
+
+    def test_live_numbers_carry_no_estimate_warning(self):
+        self.save_weekly(30, hours_to_reset=100)
+
+        self.assertNotIn("Estimate only", token_bar.build_report(self.home, self.now))
+
+    def test_sync_reuses_the_saved_reset_and_moves_the_percent(self):
+        (self.projects / "session.jsonl").write_text(request_line("req_1", self.now - timedelta(minutes=5), 610_000))
+        token_bar.main(["weekly-only"], self.home)
+        token_bar.calibrate(self.home, "weekly", "61", "Sun 5:30 AM", self.now)
+        saved = json.loads(token_bar.config_path(self.home).read_text())["weekly"]["reset_at"]
+
+        message, code = token_bar.main(["sync", "63"], self.home)
+        text = token_bar.build_report(self.home, datetime.now(timezone.utc))
+
+        self.assertEqual(code, 0)
+        self.assertIn("Calibrated. Your weekly limit", message)
+        self.assertIn("63%", text)
+        self.assertEqual(json.loads(token_bar.config_path(self.home).read_text())["weekly"]["reset_at"], saved)
+
+    def test_sync_without_a_saved_reset_asks_for_it(self):
+        (self.projects / "session.jsonl").write_text(request_line("req_1", self.now - timedelta(minutes=5), 100))
+        token_bar.main(["weekly-only"], self.home)
+
+        message, code = token_bar.main(["sync", "63"], self.home)
+
+        self.assertEqual(code, 1)
+        self.assertIn("don't know when your weekly limit resets", message)
+        self.assertIn('63 "Sun 5:30 AM"', message)
+
+    def test_sync_picks_the_window_you_name(self):
+        (self.projects / "session.jsonl").write_text(request_line("req_1", self.now - timedelta(minutes=5), 400_000))
+        token_bar.calibrate(self.home, "five_hour", "40", "2:20 PM", self.now)
+
+        message, _ = token_bar.main(["sync", "50", "five_hour"], self.home)
+
+        self.assertIn("Your 5-hour limit is about 800,000 tokens", message)
+
+    def test_sync_rejects_a_bad_percent(self):
+        message, code = token_bar.main(["sync", "lots"], self.home)
+
+        self.assertEqual(code, 1)
+        self.assertIn("is not a percentage", message)
+
     def save_readings(self, readings, resets):
         """Saves (minutes_ago, percent) readings the way the status line would, oldest first."""
         for minutes_ago, percent in readings:

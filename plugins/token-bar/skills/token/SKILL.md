@@ -1,7 +1,7 @@
 ---
 name: token
 description: Show your Claude usage against your limits (5-hour and weekly, or weekly only on Ultra), when the next whole percent lands, and what is using it up. Use when the user runs /token-bar:token or asks how close they are to their Claude limit or what is eating it.
-argument-hint: [status | breakdown | calibrate | statusline]
+argument-hint: [status | breakdown | sync | calibrate | statusline]
 allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py" *)
 ---
 
@@ -13,7 +13,7 @@ The script is at `${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py`. Run it as:
 
 1. Run `status` and show its output inside a code block, exactly as printed. The bars only line up in a code block. Don't add numbers of your own.
 
-2. If the output has a `Live numbers: off` line, offer live numbers first. This is the best way to get accurate numbers, because Claude reports them itself and the user types nothing. Ask once:
+2. If the output has a `Live numbers: off` line, first ask once: "Do you use Claude Code in a terminal, or in the Claude desktop app?" Live numbers come from the status line, which only runs in a terminal. If they use the desktop app, skip the rest of this step and go to step 3. Don't offer the status line to them. If they use a terminal, offer live numbers. This is the best way to get accurate numbers, because Claude reports them itself and the user types nothing. Ask once:
 
    "Want automatic, accurate numbers? I can add a status line to your Claude settings. It only changes that one setting, and I won't replace a status line you already have. After that, run this command again and it shows your live usage."
 
@@ -48,5 +48,11 @@ The script is at `${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py`. Run it as:
        python3 "${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py" install-shortcut
 
    Show the script's result. If it says the command was added but `/token` isn't listed yet, tell the user to restart Claude Code. Don't offer this again in the same session.
+
+7. Without live numbers, the percent is an estimate and drifts a few points, because Claude also counts usage token-bar can't see. Whenever the user tells you the percent the app shows, such as "the app says 63%", sync to it instead of asking for anything else. The saved reset time is reused, so only the percent is needed:
+
+       python3 "${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py" sync <percent>
+
+   Add `weekly` or `five_hour` to pick a window; it picks the right one by itself when the account has only a weekly limit. If it says it doesn't know the reset time yet, ask for it and use `calibrate` from step 3 once. Then run `status` again and show it as in step 1. `sync` is also the argument to use when the user runs `/token-bar:token sync`.
 
 If the shell reports `python3: command not found`, tell the user Python 3 is needed and don't try to install it yourself.

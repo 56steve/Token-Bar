@@ -375,6 +375,7 @@ def build_report(home, now):
     records = None
 
     entries, sources, missing, shown = [], {}, [], set()
+    estimated = False
     weekly_only = bool(config.get("weekly_only"))
     no_five_hour_reported = False
     for key, window in WINDOWS.items():
@@ -418,6 +419,7 @@ def build_report(home, now):
             percent = used / limit * 100
             resets_at = start + period if anchor else None
             sources[window["label"]] = "estimate from your calibration"
+            estimated = True
             nxt, minutes = next_point(percent, limit, tokens_per_minute)
             idle = nxt is not None and minutes is None
             rate = tokens_per_minute / limit * 100 if tokens_per_minute > 0 else None
@@ -447,6 +449,11 @@ def build_report(home, now):
         text += f"\n\nSource: {distinct.pop()}"
     else:
         text += "\n\nSource: " + "; ".join(f"{name}: {how}" for name, how in sources.items())
+    if estimated:
+        text += (
+            "\n\nEstimate only: it can be a few points off, because Claude also counts usage "
+            "token-bar can't see (claude.ai, the app). Tell me the percent the app shows and I'll sync to it."
+        )
     if no_five_hour_reported:
         text += "\n\nClaude reports no 5-hour limit for your account, only a weekly one."
     if missing:
@@ -579,6 +586,7 @@ def warning_output(home, now):
 
 
 def calibrate(home, key, percent_text, reset_text, now):
+    """Sets a window's limit from the percent Claude shows. Without a reset time, keeps the saved one."""
     try:
         percent = float(percent_text.strip().rstrip("%"))
     except ValueError:
@@ -587,7 +595,17 @@ def calibrate(home, key, percent_text, reset_text, now):
         raise ValueError(f"'{percent_text}' must be above 0 and at most 100")
 
     window = WINDOWS[key]
-    anchor = parse_reset(reset_text, now)
+    config = read_json(config_path(home)) or {}
+    if reset_text:
+        anchor = parse_reset(reset_text, now)
+    else:
+        saved = (config.get(key) or {}).get("reset_at")
+        if not saved:
+            raise ValueError(
+                f"I don't know when your {window['label'].lower()} limit resets yet. "
+                f"Give me the percent and the reset time, such as {percent_text.strip()} \"Sun 5:30 AM\"."
+            )
+        anchor = parse_time(saved)
     period = timedelta(hours=window["hours"])
     start = window_start(anchor, period, now)
     records = scan_usage(home / ".claude" / "projects", now - timedelta(days=PROJECTS_DAYS))
@@ -596,7 +614,6 @@ def calibrate(home, key, percent_text, reset_text, now):
         raise ValueError("no Claude usage in this window yet, so there is nothing to calibrate against. Use Claude a little, then try again.")
 
     limit = round(used / (percent / 100))
-    config = read_json(config_path(home)) or {}
     config[key] = {"limit": limit, "reset_at": anchor.isoformat()}
     write_json(config_path(home), config)
     local_reset = anchor.astimezone().strftime("%a %I:%M %p").lstrip("0")
@@ -616,7 +633,7 @@ def set_weekly_only(home, enabled):
     return "token-bar will track both your 5-hour and weekly limits again."
 
 
-def default_breakdown_window(home):
+def default_window(home):
     """The weekly window when the account has no 5-hour limit, otherwise the 5-hour window."""
     if (read_json(config_path(home)) or {}).get("weekly_only"):
         return "weekly"
@@ -763,6 +780,9 @@ def main(argv, home, stdin_text=None, script_path=None):
     commands.add_parser("install-shortcut")
     breakdown = commands.add_parser("breakdown")
     breakdown.add_argument("window", nargs="?", choices=sorted(WINDOWS))
+    sync = commands.add_parser("sync")
+    sync.add_argument("percent")
+    sync.add_argument("window", nargs="?", choices=sorted(WINDOWS))
     weekly_only = commands.add_parser("weekly-only")
     weekly_only.add_argument("setting", nargs="?", choices=("on", "off"), default="on")
     args = parser.parse_args(argv)
@@ -781,10 +801,12 @@ def main(argv, home, stdin_text=None, script_path=None):
                 "kept": "You already have your own /token skill, so it was left as it is.",
             }
             return messages[result], code
+        if args.command == "sync":
+            return calibrate(home, args.window or default_window(home), args.percent, None, now), 0
         if args.command == "weekly-only":
             return set_weekly_only(home, args.setting == "on"), 0
         if args.command == "breakdown":
-            window = args.window or default_breakdown_window(home)
+            window = args.window or default_window(home)
             start = window_bounds(home, window, now)
             requests = [r for r in scan_requests(home / ".claude" / "projects", start) if r["when"] <= now]
             return breakdown_text(requests, WINDOWS[window]["label"].lower()), 0
