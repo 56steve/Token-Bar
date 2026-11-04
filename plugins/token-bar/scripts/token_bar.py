@@ -29,6 +29,8 @@ LOOKBACK_MINUTES = 60
 PROJECTION_MAX_HOURS = 6
 # A weekly pace needs this much of the week behind it before it says anything useful.
 AVERAGE_PACE_MIN_HOURS = 12
+# An estimate anchored to a sync older than this says it may have drifted.
+STALE_SYNC_HOURS = 12
 CHART_DAYS = 7
 CHART_LABEL_WIDTH = 7
 CHART_BAR_WIDTH = 14
@@ -447,6 +449,28 @@ def render_block(label, width, percent, nxt, minutes, idle, resets_in, projectio
     return "\n".join(lines)
 
 
+def percent_since_sync(setting, records, start, now):
+    """The percent you last synced plus the usage since, as (percent, seconds since the sync).
+
+    Anchoring to the last sync keeps the error to the usage since then, instead of letting a
+    mismatch in the tokens-per-percent ratio grow across the whole window. None when there is
+    no usable sync in the current window, so the caller falls back to counting the whole window.
+    """
+    synced = (setting or {}).get("synced")
+    limit = (setting or {}).get("limit")
+    if not isinstance(synced, dict) or not limit:
+        return None
+    try:
+        synced_at = parse_time(synced["at"])
+        base = float(synced["percent"])
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+    if not start <= synced_at <= now:
+        return None
+    since = sum(tokens for when, tokens in records if synced_at < when <= now)
+    return min(base + since / limit * 100, 100.0), (now - synced_at).total_seconds()
+
+
 SECTIONS = ("summary", "verdict", "budget", "chart", "all")
 SECTION_ALIASES = {"week": "chart"}
 
@@ -467,6 +491,7 @@ def build_report(home, now, section="summary"):
 
     entries, sources, missing, shown = [], {}, [], set()
     estimated = False
+    sync_ages = []
     weekly_only = bool(config.get("weekly_only"))
     no_five_hour_reported = False
     for key, window in WINDOWS.items():
@@ -506,8 +531,13 @@ def build_report(home, now, section="summary"):
             if rate is None and limit and tokens_per_minute > 0:
                 rate = tokens_per_minute / limit * 100
         else:
-            used = sum(tokens for when, tokens in records if start <= when <= now)
-            percent = used / limit * 100
+            anchored = percent_since_sync(setting, records, start, now)
+            if anchored:
+                percent, sync_age = anchored
+                sync_ages.append(sync_age)
+            else:
+                used = sum(tokens for when, tokens in records if start <= when <= now)
+                percent = used / limit * 100
             resets_at = start + period if anchor else None
             sources[window["label"]] = "estimate from your calibration"
             estimated = True
@@ -579,7 +609,15 @@ def build_report(home, now, section="summary"):
     else:
         text += "\n\nSource: " + "; ".join(f"{name}: {how}" for name, how in sources.items())
     if estimated:
-        text += "\n\n≈ Estimate, can be a few points off. Tell me the % your app shows and I'll sync to it."
+        ask = "Tell me the % your app shows and I'll sync to it."
+        if not sync_ages:
+            text += f"\n\n≈ Estimate, can be a few points off. {ask}"
+        else:
+            age = format_age(max(sync_ages))
+            if max(sync_ages) > STALE_SYNC_HOURS * 3600:
+                text += f"\n\n≈ Estimate from your sync {age} ago, so it may have drifted. {ask}"
+            else:
+                text += f"\n\n≈ Estimate from your sync {age} ago, can be a few points off. {ask}"
     if no_five_hour_reported:
         text += "\n\nClaude reports no 5-hour limit for your account, only a weekly one."
     if missing:
@@ -740,7 +778,11 @@ def calibrate(home, key, percent_text, reset_text, now):
         raise ValueError("no Claude usage in this window yet, so there is nothing to calibrate against. Use Claude a little, then try again.")
 
     limit = round(used / (percent / 100))
-    config[key] = {"limit": limit, "reset_at": anchor.isoformat()}
+    config[key] = {
+        "limit": limit,
+        "reset_at": anchor.isoformat(),
+        "synced": {"percent": percent, "at": now.isoformat()},
+    }
     write_json(config_path(home), config)
     return f"Calibrated. Your {window['label'].lower()} limit is about {limit:,} tokens, resetting {local_time_text(anchor)}."
 
