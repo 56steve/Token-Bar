@@ -73,6 +73,7 @@ A marketplace named `token-bar` replaces one you already added with that name. T
 2. **Write a test first when you can.** Every behavior has a test in `tests/`, written with `unittest`. A bug fix should come with a test that fails without it.
 3. **Open the pull request against `development`.** `main` is what the plugin install follows, so it only changes when a release is merged.
 4. **Say what changed and why** in the description, and include before and after output if the output changed.
+5. **Let CI run.** On every pull request it runs the Python tests (Python 3.9 and 3.13, on Linux and macOS), `ruff check`, and the Rust tests and `clippy`. It should be green before a merge. The tests must not depend on your timezone, because CI runs in UTC: build times in local time or relative to "now", never from a fixed UTC moment you then read as local.
 
 ### Style
 
