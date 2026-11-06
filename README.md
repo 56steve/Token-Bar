@@ -1,6 +1,6 @@
-# token-bar
+# token-bar: Claude Code and Codex usage limit tracker
 
-Ask your coding agent how close you are to your usage limit.
+See how close you are to your Claude Code and Codex usage limits, the 5-hour and weekly ones, without leaving your coding agent. Just ask, and the answer shows up in the chat.
 
 token-bar is a plugin for **Claude Code** and **Codex**. It reads the usage numbers each tool already keeps on your machine, and tells you:
 
@@ -9,7 +9,7 @@ token-bar is a plugin for **Claude Code** and **Codex**. It reads the usage numb
 - **when it resets**: a countdown to the next reset
 - **whether you'll make it**: a plain verdict on your pace, and how much you can use per day to last until the reset
 
-It makes no network calls and needs no account.
+It makes no network calls and needs no account. It works with Pro, Max and Ultra plans (Ultra only has a weekly limit).
 
 [![CI](https://github.com/56steve/Token-Bar/actions/workflows/ci.yml/badge.svg)](https://github.com/56steve/Token-Bar/actions/workflows/ci.yml)
 [![MIT license](https://img.shields.io/badge/license-MIT-3ddc97)](LICENSE)
@@ -25,6 +25,16 @@ The first answer is short: the bar, when it resets, and a one-line headline.
 Ask for more and it opens the details: the pace verdict, a daily budget, and a 7-day chart.
 
 ![The full answer: the weekly bar, an On track verdict, a daily budget, and a bar chart of the last 7 days](assets/details.png)
+
+## Why token-bar
+
+- **It lives where you work.** You ask your agent and the answer appears in the chat. There's no extra app to install, launch, or keep running in your menu bar.
+- **It's private by design.** It reads only the files your tools already write on your machine. It makes no network calls, never reads your sign-in token or Keychain, and never calls an endpoint, so there's nothing for a tool update to break.
+- **It helps you decide, not just look.** Besides the percent, it says whether you're on pace, how much you can use per day to last until the reset, and which days were heavy.
+- **One tool for both.** Claude Code and Codex, with the same kind of answer.
+- **Nothing to build.** Plain Python 3 with no packages. It runs wherever Python does, and the tests run on macOS and Linux.
+
+A menu-bar app is a good choice if you want an always-visible gauge. token-bar is for when you'd rather just ask.
 
 ## Install
 
