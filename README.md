@@ -11,6 +11,7 @@ token-bar is a plugin for **Claude Code** and **Codex**. It reads the usage numb
 
 It makes no network calls and needs no account.
 
+[![CI](https://github.com/56steve/Token-Bar/actions/workflows/ci.yml/badge.svg)](https://github.com/56steve/Token-Bar/actions/workflows/ci.yml)
 [![MIT license](https://img.shields.io/badge/license-MIT-3ddc97)](LICENSE)
 ![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757)
 ![Codex plugin](https://img.shields.io/badge/Codex-plugin-10a37f)

@@ -415,11 +415,13 @@ class UsageTests(unittest.TestCase):
         self.assertNotIn("Budget", token_bar.build_report(self.home, self.now))
 
     def test_times_read_naturally_in_the_local_timezone(self):
-        when = datetime(2026, 11, 8, 0, 0, tzinfo=timezone.utc).astimezone().replace(hour=5, minute=30)
+        # Naive datetimes are read as local time, so these are Sunday in any timezone.
+        def sunday(hour, minute):
+            return datetime(2026, 11, 8, hour, minute).astimezone()
 
-        self.assertEqual(token_bar.local_time_text(when), "Sun 5:30 AM")
-        self.assertEqual(token_bar.local_time_text(when.replace(hour=17, minute=5)), "Sun 5:05 PM")
-        self.assertEqual(token_bar.local_time_text(when.replace(hour=0, minute=0)), "Sun 12:00 AM")
+        self.assertEqual(token_bar.local_time_text(sunday(5, 30)), "Sun 5:30 AM")
+        self.assertEqual(token_bar.local_time_text(sunday(17, 5)), "Sun 5:05 PM")
+        self.assertEqual(token_bar.local_time_text(sunday(0, 0)), "Sun 12:00 AM")
 
     def test_no_average_pace_projection_while_a_5_hour_limit_exists(self):
         reset = int((self.now + timedelta(hours=96)).timestamp())
