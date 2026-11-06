@@ -7,6 +7,7 @@ token-bar is a plugin for **Claude Code** and **Codex**. It reads the usage numb
 - **where you stand**: the percent used for each limit window
 - **when the next point lands**: an estimate of how long until the percent goes up by one, based on how fast you've been working
 - **when it resets**: a countdown to the next reset
+- **whether you'll make it**: a plain verdict on your pace, and how much you can use per day to last until the reset
 
 It makes no network calls and needs no account.
 
@@ -37,20 +38,37 @@ Run these two commands inside Claude Code:
 
 Then run `/token-bar:token`. Claude Code always puts a plugin's name in front of its commands, so that's the full name. After your first numbers, token-bar offers to add a short `/token` for you. Say yes, and it adds one small skill to your own skills folder that hands off to the plugin. It never replaces a `/token` skill you wrote yourself, and it keeps working after plugin updates.
 
-The first time, it asks one question: do you want live numbers?
+The first time, it asks where you use Claude Code: a terminal or the desktop app.
 
-- **Yes.** It adds a status line to your Claude settings, so Claude reports your real percentages to token-bar. After that you never type a number.
-- **No.** It asks once for the percent Claude shows you and when it resets, then estimates from there.
+- **Terminal.** It offers live numbers. It adds a status line to your Claude settings, so Claude reports your real percentages to token-bar, and after that you never type a number. It only changes that one setting, and it never replaces a status line you already have.
+- **Desktop app.** The status line doesn't run there, so it asks once for the percent Claude shows you and when it resets, then estimates from there. You can correct it any time by telling it the percent the app shows.
+- **Ultra plan.** Ultra has no 5-hour limit, so it only asks about the weekly one.
 
-It only changes the one status line setting, and it never replaces a status line you already have.
-
-Each limit prints as a bar, with the values filled in from your own usage:
+The answer is short, with the values filled in from your own usage:
 
 ```
 <window>  <bar>  <percent>% → <next percent>% in ~<minutes>
           resets in <time>
+          <one-line headline>
 
+More detail: <sections you can open>
 Source: <where the numbers came from>
+```
+
+### Update
+
+To pick up a new version, run these two commands inside Claude Code, then restart it:
+
+```
+/plugin marketplace update token-bar
+/plugin update token-bar@token-bar
+```
+
+Or from a terminal:
+
+```bash
+claude plugin marketplace update token-bar
+claude plugin update token-bar@token-bar
 ```
 
 ### Codex
@@ -72,13 +90,13 @@ There is nothing to set up. Codex already writes your limits into its own sessio
 
 ## More than a percent
 
-- **Will you make it to the reset?** Under the reset time, token-bar says whether your current pace reaches the limit first, for example "at this pace you'd hit 100% in ~1h 5m, about 35 min before the reset", or where you'll end up, such as "you'll reach ~41% by the reset". It only shows this for windows that reset within 6 hours, because a pace measured over an hour says little about a window that lasts days.
+- **Will you make it to the reset?** Under the reset time, token-bar says whether your current pace reaches the limit first, for example "at this pace you'd hit 100% in ~1h 5m, about 35 min before the reset", or where you'll end up, such as "you'll reach ~41% by the reset". This version only shows for windows that reset within 6 hours, because a pace measured over an hour says little about a window that lasts days. For the weekly limit, the pace verdict below uses your average pace over the week instead.
 - **Short by default, details on request.** The first answer is just the bars with a one-line headline. A `More detail` line lists what you can open, and you ask for it in plain words ("show my budget", "show the chart") or with `/token-bar:token budget`, `verdict`, `chart` or `all`.
 - **Are you on pace?** For the weekly limit, a one-line verdict sits under the bar: "✓ On track", "◐ Tight", or "⚠ Using it too fast", with the time you'd run out.
 - **How much can you use per day?** A one-line budget turns what's left into a daily number, for example "Budget: ~18% a day. Today: 25%, over budget." It says how much you've used today when it knows. On the last day it counts the hours left instead.
 - **Which days were heavy?** One bar per day for the last 7 days, longest for your busiest day, with the tokens beside it. An empty bar is a day with no use. It's built from your Claude Code logs, so it shows the shape of your week, not exact usage.
 - **What's using your limit?** Run `/token-bar:token breakdown` in Claude Code, or ask Codex "what is using my Codex limit?". You get the share of tokens by project and by model. In Claude Code it also splits out what your subagents used. These are shares of the tokens counted from the logs, not exact shares of your limit, because the tools weigh tokens in ways the logs don't show.
-- **A heads-up before you hit the wall (Claude Code, with live numbers).** A small hook tells you once when a window first crosses 80% and again at 90%, and stays quiet otherwise. Set `TOKEN_BAR_NO_WARN=1` to turn it off. This one is new: its logic is tested, but it hasn't been seen in a live Claude Code session yet.
+- **A heads-up before you hit the wall (Claude Code, with live numbers).** A small hook tells you once when a window first crosses 80% and again at 90%, and stays quiet otherwise. Set `TOKEN_BAR_NO_WARN=1` to turn it off. It needs live numbers, so it doesn't fire in the desktop app yet. Its logic is tested, but it hasn't been seen in a live Claude Code session.
 
 ## Supported tools
 
@@ -119,13 +137,17 @@ cargo install --git https://github.com/56steve/Token-Bar token-bar
 token-bar
 ```
 
+It shows the percent, the next point and the reset time. The plugin has the newer parts: the pace verdict, the daily budget, the 7-day chart, `sync`, and the Ultra weekly-only mode.
+
 ## Not affiliated with Anthropic or OpenAI
 
 token-bar is an independent open-source project. It is not made by, endorsed by, or affiliated with Anthropic or OpenAI. Claude, Claude Code, and Codex are their makers' products.
 
 ## Contributing
 
-Issues and pull requests are welcome, especially readers for other tools. Each tool is one small Python file that finds the tool's usage records and prints them:
+Issues and pull requests are welcome, especially readers for other tools. **Start with [CONTRIBUTING.md](CONTRIBUTING.md)**: it covers the one rule (token-bar never sends anything out), how to set up and test, the style, and how to add a tool.
+
+Each tool is one small Python file that finds the tool's usage records and prints them:
 
 - [`plugins/token-bar/scripts/token_bar.py`](plugins/token-bar/scripts/token_bar.py) for Claude Code
 - [`plugins/token-bar-codex/skills/token-bar/scripts/codex_usage.py`](plugins/token-bar-codex/skills/token-bar/scripts/codex_usage.py) for Codex
