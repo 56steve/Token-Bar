@@ -61,4 +61,8 @@ The script is at `${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py`. Run it as:
 
    `verdict` is the full pace sentence, `budget` is the per-day budget, `chart` (or `week`) is the 7-day chart, and `all` is everything at once. Don't open a section the user didn't ask for.
 
+9. If the user asks whether the heads-up warnings work, or whether the hook has run, run the script with `hook-check` and tell them what it says. The hook runs each time they send a message in Claude Code. If it says it has never run, they should send one message and ask again.
+
+       python3 "${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py" hook-check
+
 If the shell reports `python3: command not found`, tell the user Python 3 is needed and don't try to install it yourself.

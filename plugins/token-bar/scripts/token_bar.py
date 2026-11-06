@@ -38,6 +38,7 @@ CHART_BAR_WIDTH = 14
 ON_TRACK_BELOW_PERCENT = 85
 WARN_LEVELS = (80, 90)
 SHORTCUT_MARKER = "<!-- installed by token-bar -->"
+SCAN_CACHE_VERSION = 1
 HISTORY_KEEP_SECONDS = 3 * 3600
 HISTORY_MAX_ENTRIES = 400
 
@@ -59,6 +60,10 @@ def config_path(home):
 
 def live_path(home):
     return data_dir(home) / "rate_limits.json"
+
+
+def scan_cache_path(home):
+    return data_dir(home) / "scan_cache.json"
 
 
 def history_path(home):
@@ -179,55 +184,137 @@ def project_name(entry, path):
     return path.parent.name
 
 
-def scan_requests(projects, cutoff):
+def request_from_line(line, path, cutoff):
+    """(request id, [epoch seconds, tokens, project, model, subagent]) for a usage line, else None."""
+    try:
+        entry = json.loads(line)
+    except UnicodeDecodeError:
+        # A stray invalid byte in the text. Drop it and read the rest, as reading the file as text would.
+        try:
+            entry = json.loads(line.decode("utf-8", errors="ignore"))
+        except ValueError:
+            return None
+    except ValueError:
+        return None
+    if not isinstance(entry, dict) or entry.get("type") != "assistant":
+        return None
+    usage = (entry.get("message") or {}).get("usage")
+    request_id = entry.get("requestId")
+    stamp = entry.get("timestamp")
+    if not usage or not request_id or not stamp:
+        return None
+    try:
+        when = parse_time(stamp)
+    except ValueError:
+        return None
+    if when < cutoff:
+        return None
+    model = (entry.get("message") or {}).get("model")
+    return request_id, [when.timestamp(), tokens_of(usage), project_name(entry, path), model, bool(entry.get("isSidechain"))]
+
+
+def read_new_requests(path, state, cutoff):
+    """Adds the requests written to `path` since `state['offset']` to `state['requests']`.
+
+    The logs only ever grow at the end, so a file that was read before only needs its new
+    bytes. A last line that isn't finished yet is left for next time.
+    """
+    with path.open("rb") as handle:
+        handle.seek(state["offset"])
+        data = handle.read()
+    complete, newline, tail = data.rpartition(b"\n")
+    lines = complete.split(b"\n") if newline else []
+    consumed = len(complete) + 1 if newline else 0
+    if tail.strip():
+        try:
+            json.loads(tail)
+        except ValueError:
+            pass  # half written
+        else:
+            lines.append(tail)
+            consumed = len(data)
+    requests = state["requests"]
+    for line in lines:
+        if b'"usage"' not in line:  # most lines are not model responses, so skip parsing them
+            continue
+        found = request_from_line(line, path, cutoff)
+        if found:
+            request_id, record = found
+            previous = requests.get(request_id)
+            if previous is None or previous[1] < record[1]:
+                requests[request_id] = record
+    state["offset"] += consumed
+
+
+def load_scan_cache(cache_file, cutoff):
+    """The saved per-file progress, or {} when there is none or it covers too little time."""
+    saved = read_json(cache_file) if cache_file else None
+    if not isinstance(saved, dict) or saved.get("version") != SCAN_CACHE_VERSION:
+        return {}
+    files = saved.get("files")
+    if not isinstance(files, dict) or not isinstance(saved.get("since"), (int, float)):
+        return {}
+    if saved["since"] > cutoff.timestamp():
+        return {}  # it dropped requests this caller still wants
+    return files
+
+
+def scan_requests(projects, cutoff, cache_file=None):
     """Each request since `cutoff`, with its project, model, and whether a subagent made it.
 
     Claude Code writes the same request several times as it streams, so each is counted once.
+    With a cache_file, what each log file contributed is remembered, so the next run reads only
+    what was added since instead of everything again (which takes many seconds on a busy machine).
     """
     if not projects.is_dir():
         return []
+    cached = load_scan_cache(cache_file, cutoff)
+    files = {}
     by_request = {}
     for path in projects.rglob("*.jsonl"):
         try:
-            if datetime.fromtimestamp(path.stat().st_mtime, timezone.utc) < cutoff:
+            stat = path.stat()
+            if datetime.fromtimestamp(stat.st_mtime, timezone.utc) < cutoff:
                 continue
-            lines = path.read_text(errors="ignore").splitlines()
+            state = cached.get(str(path))
+            valid = isinstance(state, dict) and isinstance(state.get("requests"), dict)
+            if not valid or not isinstance(state.get("offset"), int) or state["offset"] > stat.st_size:
+                state = {"offset": 0, "requests": {}}  # new, damaged, or shorter than before: start over
+            read_new_requests(path, state, cutoff)
         except OSError:
             continue
-        for line in lines:
-            try:
-                entry = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(entry, dict) or entry.get("type") != "assistant":
-                continue
-            usage = (entry.get("message") or {}).get("usage")
-            request_id = entry.get("requestId")
-            stamp = entry.get("timestamp")
-            if not usage or not request_id or not stamp:
-                continue
-            try:
-                when = parse_time(stamp)
-            except ValueError:
-                continue
-            if when < cutoff:
-                continue
-            tokens = tokens_of(usage)
+        files[str(path)] = state
+        for request_id, (stamp, tokens, project, model, subagent) in state["requests"].items():
+            when = datetime.fromtimestamp(stamp, timezone.utc)
             previous = by_request.get(request_id)
-            if previous is None or previous["tokens"] < tokens:
+            if when >= cutoff and (previous is None or previous["tokens"] < tokens):
                 by_request[request_id] = {
-                    "when": when,
-                    "tokens": tokens,
-                    "project": project_name(entry, path),
-                    "model": (entry.get("message") or {}).get("model"),
-                    "subagent": bool(entry.get("isSidechain")),
+                    "when": when, "tokens": tokens, "project": project, "model": model, "subagent": subagent,
                 }
+    if cache_file:
+        save_scan_cache(cache_file, files, cutoff)
     return list(by_request.values())
 
 
-def scan_usage(projects, cutoff):
+def save_scan_cache(cache_file, files, cutoff):
+    """Saves per-file progress, dropping requests older than the cutoff. A failure only costs speed."""
+    since = cutoff.timestamp()
+    pruned = {
+        path: {"offset": state["offset"], "requests": {rid: r for rid, r in state["requests"].items() if r[0] >= since}}
+        for path, state in files.items()
+    }
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache_file.with_name(f"{cache_file.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"version": SCAN_CACHE_VERSION, "since": since, "files": pruned}, separators=(",", ":")))
+        tmp.replace(cache_file)
+    except OSError:
+        pass
+
+
+def scan_usage(projects, cutoff, cache_file=None):
     """(timestamp, tokens) for each request since `cutoff`."""
-    return [(request["when"], request["tokens"]) for request in scan_requests(projects, cutoff)]
+    return [(request["when"], request["tokens"]) for request in scan_requests(projects, cutoff, cache_file)]
 
 
 def recent_rate(records, start, now):
@@ -471,6 +558,15 @@ def percent_since_sync(setting, records, start, now):
     return min(base + since / limit * 100, 100.0), (now - synced_at).total_seconds()
 
 
+def estimate_percent(setting, records, start, now):
+    """(percent, seconds since the sync it is anchored to, or None) from a saved calibration."""
+    anchored = percent_since_sync(setting, records, start, now)
+    if anchored:
+        return anchored
+    used = sum(tokens for when, tokens in records if start <= when <= now)
+    return used / setting["limit"] * 100, None
+
+
 SECTIONS = ("summary", "verdict", "budget", "chart", "all")
 SECTION_ALIASES = {"week": "chart"}
 
@@ -507,7 +603,7 @@ def build_report(home, now, section="summary"):
                 missing.append(key)
             continue
         if records is None:
-            records = scan_usage(home / ".claude" / "projects", now - timedelta(days=PROJECTS_DAYS))
+            records = scan_usage(home / ".claude" / "projects", now - timedelta(days=PROJECTS_DAYS), scan_cache_path(home))
 
         period = timedelta(hours=window["hours"])
         limit = setting.get("limit") if setting else None
@@ -531,13 +627,9 @@ def build_report(home, now, section="summary"):
             if rate is None and limit and tokens_per_minute > 0:
                 rate = tokens_per_minute / limit * 100
         else:
-            anchored = percent_since_sync(setting, records, start, now)
-            if anchored:
-                percent, sync_age = anchored
+            percent, sync_age = estimate_percent(setting, records, start, now)
+            if sync_age is not None:
                 sync_ages.append(sync_age)
-            else:
-                used = sum(tokens for when, tokens in records if start <= when <= now)
-                percent = used / limit * 100
             resets_at = start + period if anchor else None
             sources[window["label"]] = "estimate from your calibration"
             estimated = True
@@ -705,41 +797,101 @@ def warned_path(home):
     return data_dir(home) / "warned.json"
 
 
+def estimated_readings(home, now):
+    """{window key: (percent, resets_at epoch)} from the synced estimate, for when there are no live numbers.
+
+    Only windows whose estimate is anchored to a sync count. An estimate that was never synced
+    can be well off, and a false alarm is worse than no heads-up.
+    """
+    config = read_json(config_path(home)) or {}
+    found = {}
+    records = None
+    for key, window in WINDOWS.items():
+        setting = config.get(key)
+        if (key == "five_hour" and config.get("weekly_only")) or not isinstance(setting, dict):
+            continue
+        if not setting.get("limit") or not setting.get("reset_at"):
+            continue
+        try:
+            anchor = parse_time(setting["reset_at"])
+        except (ValueError, TypeError, AttributeError):
+            continue
+        period = timedelta(hours=window["hours"])
+        start = window_start(anchor, period, now)
+        if records is None:
+            records = scan_usage(home / ".claude" / "projects", now - timedelta(days=PROJECTS_DAYS), scan_cache_path(home))
+        percent, sync_age = estimate_percent(setting, records, start, now)
+        if sync_age is not None:
+            found[key] = (percent, int((start + period).timestamp()))
+    return found
+
+
 def warning_for(home, now):
     """A heads-up the first time a window crosses a warning level in a reset period, else None.
 
-    Uses only Claude's saved readings, so it is fast enough to run on every prompt, and it
-    says nothing when the readings are old.
+    Uses Claude's saved readings when they are fresh, which is fast enough to run on every
+    prompt. Without them (the desktop app has no live numbers), it uses the synced estimate,
+    which reads the log files' new bytes through the scan cache. Says nothing when it has neither.
     """
     live = read_live(home)
     readings = live.get("rate_limits") or {}
     saved_at = datetime.fromtimestamp(int(live.get("saved_at", 0)), timezone.utc)
-    if not readings or now - saved_at > timedelta(minutes=FRESH_MINUTES):
-        return None
+    live_fresh = bool(readings) and now - saved_at <= timedelta(minutes=FRESH_MINUTES)
 
     state = read_json(warned_path(home)) or {}
+    estimates = None
     messages = []
     for key, window in WINDOWS.items():
-        reading = readings.get(window["live"])
-        if not reading:
-            continue
-        percent = float(reading["used_percentage"])
-        reset = int(reading["resets_at"])
+        reading = readings.get(window["live"]) if live_fresh else None
+        if reading:
+            percent, reset, estimated = float(reading["used_percentage"]), int(reading["resets_at"]), False
+        else:
+            if estimates is None:
+                estimates = estimated_readings(home, now)
+            if key not in estimates:
+                continue
+            (percent, reset), estimated = estimates[key], True
         level = max((threshold for threshold in WARN_LEVELS if percent >= threshold), default=0)
         previous = state.get(key) or {}
         already_told = previous.get("level", 0) if previous.get("reset") == reset else 0
         if level > already_told:
             state[key] = {"reset": reset, "level": level}
             resets_in = format_remaining(reset - now.timestamp())
-            messages.append(f"{window['label']} usage is at {math.floor(percent)}%, resetting in {resets_in}")
+            how = "is around" if estimated else "is at"
+            note = " (estimate)" if estimated else ""
+            messages.append(f"{window['label']} usage {how} {math.floor(percent)}%{note}, resetting in {resets_in}")
     if not messages:
         return None
     write_json(warned_path(home), state)
     return "token-bar: " + "; ".join(messages)
 
 
+def hook_ran_path(home):
+    return data_dir(home) / "hook_last_run.json"
+
+
+def record_hook_run(home, now):
+    """Notes that the hook ran, so `hook-check` can tell whether hooks fire in this setup. Never raises."""
+    try:
+        write_json(hook_ran_path(home), {"at": int(now.timestamp())})
+    except OSError:
+        pass
+
+
+def hook_check_text(home, now):
+    saved = read_json(hook_ran_path(home))
+    at = saved.get("at") if isinstance(saved, dict) else None
+    if not isinstance(at, (int, float)):
+        return (
+            "The heads-up hook hasn't run on this machine yet. It runs each time you send a message in "
+            "Claude Code, so send one and check again. If it still says this, hooks aren't running in your setup."
+        )
+    return f"The heads-up hook last ran {format_age(now.timestamp() - at)} ago."
+
+
 def warning_output(home, now):
     """The JSON a Claude Code hook prints to show a message to the user. Empty when there is nothing to say."""
+    record_hook_run(home, now)
     if os.environ.get("TOKEN_BAR_NO_WARN"):
         return ""
     try:
@@ -772,7 +924,7 @@ def calibrate(home, key, percent_text, reset_text, now):
         anchor = parse_time(saved)
     period = timedelta(hours=window["hours"])
     start = window_start(anchor, period, now)
-    records = scan_usage(home / ".claude" / "projects", now - timedelta(days=PROJECTS_DAYS))
+    records = scan_usage(home / ".claude" / "projects", now - timedelta(days=PROJECTS_DAYS), scan_cache_path(home))
     used = sum(tokens for when, tokens in records if start <= when <= now)
     if used == 0:
         raise ValueError("no Claude usage in this window yet, so there is nothing to calibrate against. Use Claude a little, then try again.")
@@ -945,6 +1097,7 @@ def main(argv, home, stdin_text=None, script_path=None):
     commands.add_parser("statusline")
     commands.add_parser("enable-statusline")
     commands.add_parser("warn")
+    commands.add_parser("hook-check")
     commands.add_parser("install-shortcut")
     breakdown = commands.add_parser("breakdown")
     breakdown.add_argument("window", nargs="?", choices=sorted(WINDOWS))
@@ -961,6 +1114,8 @@ def main(argv, home, stdin_text=None, script_path=None):
             return build_report(home, now, getattr(args, "section", "summary")), 0
         if args.command == "warn":
             return warning_output(home, now), 0
+        if args.command == "hook-check":
+            return hook_check_text(home, now), 0
         if args.command == "install-shortcut":
             result, code = install_shortcut(home)
             messages = {
@@ -976,7 +1131,9 @@ def main(argv, home, stdin_text=None, script_path=None):
         if args.command == "breakdown":
             window = args.window or default_window(home)
             start = window_bounds(home, window, now)
-            requests = [r for r in scan_requests(home / ".claude" / "projects", start) if r["when"] <= now]
+            cutoff = now - timedelta(days=PROJECTS_DAYS)  # the same horizon as everywhere else, so the cache is shared
+            everything = scan_requests(home / ".claude" / "projects", cutoff, scan_cache_path(home))
+            requests = [r for r in everything if start <= r["when"] <= now]
             return breakdown_text(requests, WINDOWS[window]["label"].lower()), 0
         if args.command == "calibrate":
             return calibrate(home, args.window, args.percent, " ".join(args.reset), now), 0
