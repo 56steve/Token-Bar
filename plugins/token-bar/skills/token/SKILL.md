@@ -1,7 +1,7 @@
 ---
 name: token
 description: Show your Claude usage against your limits (5-hour and weekly, or weekly only on Ultra), when the next whole percent lands, and what is using it up. Use when the user runs /token-bar:token or asks how close they are to their Claude limit or what is eating it.
-argument-hint: [status | verdict | budget | chart | all | breakdown | sync | calibrate | statusline]
+argument-hint: [status | verdict | budget | chart | all | breakdown | cost | sync | calibrate | statusline]
 allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py" *)
 ---
 
@@ -33,7 +33,7 @@ The script is at `${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py`. Run it as:
 
    Do the same for the weekly window with `weekly` and a time such as `Sun 5:30 AM`. Show the script's result, then run `status` again. If the user skips a window, move on and don't ask again in this session.
 
-4. If the user passes an argument, follow it: `calibrate` means step 3, `statusline` means step 2, `breakdown` means step 5, `shortcut` means step 6, `verdict`, `budget`, `chart` (or `week`) and `all` mean step 8, and `status` or no argument means step 1.
+4. If the user passes an argument, follow it: `calibrate` means step 3, `statusline` means step 2, `breakdown` means step 5, `cost` means step 10, `shortcut` means step 6, `verdict`, `budget`, `chart` (or `week`) and `all` mean step 8, and `status` or no argument means step 1.
 
 5. For `breakdown`, or when the user asks what is using up their limit, run the script with `breakdown` (add `weekly` or `five_hour` to pick a window; it picks the weekly one by itself when the account has no 5-hour limit) and show its output inside a code block, exactly as printed:
 
@@ -64,5 +64,9 @@ The script is at `${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py`. Run it as:
 9. If the user asks whether the heads-up warnings work, or whether the hook has run, run the script with `hook-check` and tell them what it says. The hook runs each time they send a message in Claude Code. If it says it has never run, they should send one message and ask again.
 
        python3 "${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py" hook-check
+
+10. When the user asks which models or efforts cost the most, or what their usage would cost, run the script with `cost` (add `weekly` or `five_hour` to pick a window) and show its output inside a code block, exactly as printed. token-bar has no built-in prices, so the first time it prints how to create the user's own `prices.json`. Show that to them as printed, and don't invent prices for them. If it reports a mistake in the file, show the message and help them fix it. The `breakdown` output already splits by model and by effort without needing prices.
+
+       python3 "${CLAUDE_PLUGIN_ROOT}/scripts/token_bar.py" cost
 
 If the shell reports `python3: command not found`, tell the user Python 3 is needed and don't try to install it yourself.

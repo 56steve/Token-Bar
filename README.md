@@ -106,7 +106,18 @@ There is nothing to set up. Codex already writes your limits into its own sessio
 - **Are you on pace?** For the weekly limit, a one-line verdict sits under the bar: "✓ On track", "◐ Tight", or "⚠ Using it too fast", with the time you'd run out.
 - **How much can you use per day?** A one-line budget turns what's left into a daily number, for example "Budget: ~18% a day. Today: 25%, over budget." It says how much you've used today when it knows. On the last day it counts the hours left instead.
 - **Which days were heavy?** One bar per day for the last 7 days, longest for your busiest day, with the tokens beside it. An empty bar is a day with no use. It's built from your Claude Code logs, so it shows the shape of your week, not exact usage.
-- **What's using your limit?** Run `/token-bar:token breakdown` in Claude Code, or ask Codex "what is using my Codex limit?". You get the share of tokens by project and by model. In Claude Code it also splits out what your subagents used. These are shares of the tokens counted from the logs, not exact shares of your limit, because the tools weigh tokens in ways the logs don't show.
+- **What's using your limit?** Run `/token-bar:token breakdown` in Claude Code, or ask Codex "what is using my Codex limit?". You get the share of tokens by project and by model, with how many requests each took. In Claude Code it also splits out what your subagents used, and, when your logs record an effort level (such as medium or high), the share by effort. These are shares of the tokens counted from the logs, not exact shares of your limit, because the tools weigh tokens in ways the logs don't show.
+- **Which models and efforts are expensive? (Claude Code, optional).** Run `/token-bar:token cost`. token-bar ships with **no prices**, because they change and differ by account. Create `~/.claude/token-bar/prices.json` with your own prices per million tokens and it shows what your tokens would cost, by model and by effort, counting input, output and cache reads and writes. An id ending in `*` matches a family of models, and a model you leave out shows as "no price". It never guesses. On a subscription this isn't what you pay, since plans aren't billed per token. It shows where the expensive usage is.
+
+  ```json
+  {
+    "currency": "$",
+    "per_million_tokens": {
+      "your-model-id": {"input": 0.0, "output": 0.0, "cache_write": 0.0, "cache_read": 0.0},
+      "a-family-of-models-*": {"input": 0.0, "output": 0.0}
+    }
+  }
+  ```
 - **A heads-up before you hit the wall (Claude Code).** A small hook tells you once when a window first crosses 80% and again at 90%, and stays quiet otherwise. With live numbers it uses them. In the desktop app it uses your synced estimate and says so ("Weekly usage is around 82% (estimate)"). It only warns from an estimate you have synced at least once, because an unsynced one can be well off and a false alarm is worse than none. Set `TOKEN_BAR_NO_WARN=1` to turn it off. Its logic is tested, but I haven't confirmed that hooks run in the desktop app: run `token_bar.py hook-check` after sending a message to see whether it has run.
 
 ## Supported tools
