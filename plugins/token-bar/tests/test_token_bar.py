@@ -505,6 +505,141 @@ class UsageTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("is not a percentage", message)
 
+    def scan(self, cutoff=None, cached=True):
+        cutoff = cutoff or self.now - timedelta(days=7)
+        cache = token_bar.scan_cache_path(self.home) if cached else None
+        return token_bar.scan_requests(self.home / ".claude" / "projects", cutoff, cache)
+
+    def test_a_cached_scan_gives_the_same_requests_as_an_uncached_one(self):
+        self.write_requests([
+            request_entry("r1", self.now - timedelta(minutes=10), 600, "/work/alpha"),
+            request_entry("r2", self.now - timedelta(minutes=9), 300, "/work/beta", model="claude-haiku-5-5", subagent=True),
+            request_entry("r2", self.now - timedelta(minutes=9), 350, "/work/beta", model="claude-haiku-5-5", subagent=True),
+        ])
+        def key(request):
+            return request["when"], request["tokens"], request["project"], request["model"], request["subagent"]
+
+        plain = sorted(map(key, self.scan(cached=False)))
+
+        self.assertEqual(sorted(map(key, self.scan())), plain)
+        self.assertEqual(sorted(map(key, self.scan())), plain)  # and again, now from the cache
+        self.assertEqual(sorted(tokens for _, tokens, *_ in plain), [350, 600])  # the streamed r2 counted once
+
+    def test_a_second_scan_reads_only_what_was_added(self):
+        path = self.projects / "session.jsonl"
+        first = request_line("req_a", self.now - timedelta(minutes=20), 10_000)
+        path.write_text(first + "\n")
+        self.scan()
+        with path.open("r+") as handle:
+            handle.write("x" * len(first))  # overwrite in place, so reading it again would find nothing
+        with path.open("a") as handle:
+            handle.write(request_line("req_b", self.now - timedelta(minutes=5), 3_000) + "\n")
+
+        tokens = sorted(request["tokens"] for request in self.scan())
+
+        self.assertEqual(tokens, [3_000, 10_000])  # req_a came from the cache, not from the file
+
+    def test_a_streamed_request_keeps_its_biggest_count_across_scans(self):
+        path = self.projects / "session.jsonl"
+        path.write_text(request_line("req_a", self.now - timedelta(minutes=5), 10) + "\n")
+        self.scan()
+        with path.open("a") as handle:
+            handle.write(request_line("req_a", self.now - timedelta(minutes=5), 25) + "\n")
+
+        self.assertEqual([request["tokens"] for request in self.scan()], [25])
+
+    def test_a_file_that_got_shorter_is_read_again_from_the_start(self):
+        path = self.projects / "session.jsonl"
+        path.write_text("\n".join(request_line(f"r{i}", self.now - timedelta(minutes=i + 1), 1_000) for i in range(3)))
+        self.assertEqual(len(self.scan()), 3)
+
+        path.write_text(request_line("fresh", self.now - timedelta(minutes=1), 7))
+
+        self.assertEqual([request["tokens"] for request in self.scan()], [7])
+
+    def test_a_deleted_file_stops_counting(self):
+        path = self.projects / "session.jsonl"
+        path.write_text(request_line("req_a", self.now - timedelta(minutes=5), 100))
+        self.assertEqual(len(self.scan()), 1)
+
+        path.unlink()
+
+        self.assertEqual(self.scan(), [])
+
+    def test_a_half_written_last_line_waits_until_it_is_finished(self):
+        path = self.projects / "session.jsonl"
+        done = request_line("req_a", self.now - timedelta(minutes=9), 100)
+        second = request_line("req_b", self.now - timedelta(minutes=8), 200)
+        path.write_text(done + "\n" + second[:40])
+        self.assertEqual([request["tokens"] for request in self.scan()], [100])
+
+        path.write_text(done + "\n" + second + "\n")
+
+        self.assertEqual(sorted(request["tokens"] for request in self.scan()), [100, 200])
+
+    def test_a_last_line_without_a_newline_still_counts_when_it_is_complete(self):
+        (self.projects / "session.jsonl").write_text(request_line("req_a", self.now - timedelta(minutes=9), 100))
+
+        self.assertEqual([request["tokens"] for request in self.scan()], [100])
+
+    def test_a_stray_invalid_byte_does_not_lose_the_request(self):
+        line = request_line("req_a", self.now - timedelta(minutes=9), 100).encode()
+        line = line.replace(b'"type": "assistant"', b'"type": "assistant", "note": "bad\xff"')
+        line = line.replace(b'"type":"assistant"', b'"type":"assistant","note":"bad\xff"')
+        (self.projects / "session.jsonl").write_bytes(line + b"\n")
+
+        self.assertIn(b"\xff", line)
+        self.assertEqual([request["tokens"] for request in self.scan()], [100])
+
+    def test_a_damaged_or_old_cache_is_ignored_and_replaced(self):
+        (self.projects / "session.jsonl").write_text(request_line("req_a", self.now - timedelta(minutes=9), 100))
+        cache = token_bar.scan_cache_path(self.home)
+        for bad in ("not json at all", json.dumps({"version": 0, "since": 0, "files": {}}),
+                    json.dumps({"version": token_bar.SCAN_CACHE_VERSION, "since": "x", "files": []}),
+                    json.dumps({"version": token_bar.SCAN_CACHE_VERSION, "since": 0, "files": {"k": "v"}})):
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(bad)
+
+            self.assertEqual([request["tokens"] for request in self.scan()], [100])
+            self.assertEqual(json.loads(cache.read_text())["version"], token_bar.SCAN_CACHE_VERSION)
+
+    def test_a_cache_that_covers_less_time_is_not_trusted_for_a_longer_look(self):
+        self.write_requests([
+            request_line("old", self.now - timedelta(days=3), 500),
+            request_line("new", self.now - timedelta(minutes=5), 50),
+        ])
+        short = self.scan(cutoff=self.now - timedelta(hours=1))
+        self.assertEqual([request["tokens"] for request in short], [50])
+
+        longer = self.scan(cutoff=self.now - timedelta(days=7))
+
+        self.assertEqual(sorted(request["tokens"] for request in longer), [50, 500])
+
+    def test_the_cache_drops_requests_older_than_the_cutoff(self):
+        self.write_requests([
+            request_line("old", self.now - timedelta(days=3), 500),
+            request_line("new", self.now - timedelta(minutes=5), 50),
+        ])
+
+        self.scan(cutoff=self.now - timedelta(hours=1))
+
+        saved = json.loads(token_bar.scan_cache_path(self.home).read_text())
+        kept = [r for state in saved["files"].values() for r in state["requests"].values()]
+        self.assertEqual([r[1] for r in kept], [50])
+
+    def test_the_report_and_the_breakdown_share_one_cache(self):
+        self.save_weekly(30, hours_to_reset=96)
+        self.write_requests([request_entry("r1", self.now - timedelta(minutes=10), 600, "/work/alpha")])
+
+        token_bar.build_report(self.home, self.now)
+        cache = token_bar.scan_cache_path(self.home)
+        saved_once = cache.read_text()
+        text, _ = token_bar.main(["breakdown"], self.home)
+
+        self.assertTrue(cache.exists())
+        self.assertIn("alpha", text)
+        self.assertEqual(json.loads(cache.read_text())["files"].keys(), json.loads(saved_once)["files"].keys())
+
     def synced_setting(self, percent, minutes_ago, limit=1_000_000):
         at = self.now - timedelta(minutes=minutes_ago)
         return {"limit": limit, "synced": {"percent": percent, "at": at.isoformat()}}
@@ -922,6 +1057,101 @@ class WarnTests(unittest.TestCase):
         token_bar.warned_path(self.home).write_text("{ not json")
 
         self.assertIn("is at 90%", token_bar.warning_output(self.home, self.now))
+
+    def save_estimate(self, percent, key="weekly", hours_synced_ago=1, synced=True, **extra):
+        """Saves a calibration whose reset is three days away, synced at `percent`, as the desktop app has."""
+        setting = {"limit": 1_000_000, "reset_at": (self.now + timedelta(hours=72)).isoformat()}
+        if synced:
+            setting["synced"] = {"percent": percent, "at": (self.now - timedelta(hours=hours_synced_ago)).isoformat()}
+        token_bar.write_json(token_bar.config_path(self.home), {key: setting, **extra})
+
+    def write_log(self, minutes_ago, tokens):
+        projects = self.home / ".claude" / "projects" / "demo"
+        projects.mkdir(parents=True, exist_ok=True)
+        when = self.now - timedelta(minutes=minutes_ago)
+        (projects / "session.jsonl").write_text(request_line("req_1", when, tokens))
+
+    def test_the_synced_estimate_warns_when_there_are_no_live_numbers(self):
+        self.save_estimate(82)
+
+        message = json.loads(token_bar.warning_output(self.home, self.now))["systemMessage"]
+
+        self.assertEqual(message, "token-bar: Weekly usage is around 82% (estimate), resetting in 3d 0h")
+
+    def test_the_estimate_warns_once_then_again_at_90(self):
+        self.save_estimate(82)
+        token_bar.warning_output(self.home, self.now)
+        self.assertEqual(token_bar.warning_output(self.home, self.now), "")
+        self.save_estimate(86)
+        self.assertEqual(token_bar.warning_output(self.home, self.now), "")
+
+        self.save_estimate(91)
+
+        self.assertIn("around 91% (estimate)", token_bar.warning_output(self.home, self.now))
+
+    def test_the_estimate_counts_the_usage_since_the_sync(self):
+        # Synced at 70% an hour ago, then 150k of a 1M limit: 85%.
+        self.save_estimate(70)
+        self.write_log(minutes_ago=30, tokens=150_000)
+
+        self.assertIn("around 85% (estimate)", token_bar.warning_output(self.home, self.now))
+
+    def test_an_estimate_below_80_stays_quiet(self):
+        self.save_estimate(79)
+
+        self.assertEqual(token_bar.warning_output(self.home, self.now), "")
+
+    def test_a_calibration_that_was_never_synced_does_not_warn(self):
+        self.save_estimate(0, synced=False)
+        self.write_log(minutes_ago=30, tokens=900_000)  # the old method would read this as 90%
+
+        self.assertEqual(token_bar.warning_output(self.home, self.now), "")
+
+    def test_fresh_live_numbers_win_over_the_estimate(self):
+        self.save_estimate(85)
+        self.save(50, key="seven_day", reset=int((self.now + timedelta(hours=72)).timestamp()))
+
+        self.assertEqual(token_bar.warning_output(self.home, self.now), "")
+
+    def test_old_live_numbers_fall_back_to_the_estimate(self):
+        self.save_estimate(85)
+        self.save(50, saved_minutes_ago=45, key="seven_day", reset=int((self.now + timedelta(hours=72)).timestamp()))
+
+        self.assertIn("around 85% (estimate)", token_bar.warning_output(self.home, self.now))
+
+    def test_there_is_no_5_hour_estimate_when_the_account_has_no_5_hour_limit(self):
+        self.save_estimate(85, key="five_hour", weekly_only=True)
+
+        self.assertEqual(token_bar.warning_output(self.home, self.now), "")
+
+    def test_a_broken_calibration_never_raises(self):
+        for setting in ({"limit": 1_000_000, "reset_at": "garbage"}, {"limit": "lots", "reset_at": self.now.isoformat()},
+                        {"limit": 1_000_000}, "nope"):
+            token_bar.write_json(token_bar.config_path(self.home), {"weekly": setting})
+
+            self.assertEqual(token_bar.warning_output(self.home, self.now), "")
+
+    def test_the_hook_notes_that_it_ran_even_with_warnings_turned_off(self):
+        import os
+        from unittest import mock
+
+        self.assertIn("hasn't run on this machine yet", token_bar.hook_check_text(self.home, self.now))
+
+        with mock.patch.dict(os.environ, {"TOKEN_BAR_NO_WARN": "1"}):
+            token_bar.warning_output(self.home, self.now)
+
+        self.assertEqual(
+            token_bar.hook_check_text(self.home, self.now + timedelta(minutes=7)),
+            "The heads-up hook last ran 7 min ago.",
+        )
+
+    def test_the_hook_check_command_reports_the_last_run(self):
+        token_bar.warning_output(self.home, datetime.now(timezone.utc))
+
+        text, code = token_bar.main(["hook-check"], self.home)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(text, "The heads-up hook last ran 0 min ago.")
 
 
 class ShortcutTests(unittest.TestCase):
