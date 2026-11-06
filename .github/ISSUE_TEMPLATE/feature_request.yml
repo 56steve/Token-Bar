@@ -1,0 +1,24 @@
+name: Idea or feature request
+description: Suggest something token-bar should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to find out or do?
+      description: Start with the problem, not the feature. "I want to know if I'll last until Friday" is easier to design for than "add a flag".
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like it to do?
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What do you do today instead?
+  - type: markdown
+    attributes:
+      value: |
+        token-bar never sends anything out, so ideas that need a network call or an account won't be merged.
+        See [CONTRIBUTING.md](https://github.com/56steve/Token-Bar/blob/main/CONTRIBUTING.md).

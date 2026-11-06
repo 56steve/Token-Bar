@@ -8,7 +8,7 @@ Thanks for helping. token-bar answers one question inside your coding agent: how
 
 ## Ways to help
 
-- **Report a bug.** Open an issue with what you ran, what you expected, and what you got. Useful details: your tool and version, whether you use a terminal or the desktop app, your plan (Pro, Max, Ultra, API key), and the output of `python3 plugins/token-bar/scripts/token_bar.py status` with anything private removed.
+- **Report a bug.** Open an issue (the form asks for the details below) with what you ran, what you expected, and what you got. Useful details: your tool and version, whether you use a terminal or the desktop app, your plan (Pro, Max, Ultra, API key), and the output of `python3 plugins/token-bar/scripts/token_bar.py status` with anything private removed.
 - **Suggest an idea.** Say what you were trying to find out, not only the feature you want. "I want to know if I'll last until Friday" is easier to design for than "add a flag".
 - **Add a tool.** The most wanted contribution. See [Adding a tool](#adding-a-tool) below.
 - **Improve the docs.** If something confused you, it will confuse others.

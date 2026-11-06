@@ -1,0 +1,64 @@
+name: Bug report
+description: Something in token-bar is wrong, confusing, or broken
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this. The more of these you can fill in, the faster it can be fixed.
+        Please remove anything private (project names, paths) from what you paste.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you run or ask, and what did you get?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect instead?
+    validations:
+      required: true
+  - type: dropdown
+    id: tool
+    attributes:
+      label: Which tool?
+      options:
+        - Claude Code
+        - Codex
+        - The command-line tool (Rust)
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where do you use it?
+      description: Live numbers only come from a terminal, so this changes what token-bar can do.
+      options:
+        - Terminal
+        - Claude desktop app
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: plan
+    attributes:
+      label: Your plan
+      options:
+        - Pro
+        - Max
+        - Ultra
+        - API key
+        - Not sure / other
+  - type: input
+    id: version
+    attributes:
+      label: token-bar version
+      description: Shown by `claude plugin list`, for example 0.3.0.
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: The output of `/token-bar:token all` (or the Codex answer), with anything private removed.
+      render: text
