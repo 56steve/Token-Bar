@@ -31,6 +31,25 @@ def request_entry(request_id, when, tokens, cwd, model="claude-sonnet-5-5", suba
     })
 
 
+def usage_entry(request_id, when, model, effort=None, per_turn=None, input_tokens=0, output=0, cache_write=0, cache_read=0):
+    """A model response with every kind of token, and the effort fields the logs may carry."""
+    entry = {
+        "type": "assistant",
+        "timestamp": when.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+        "requestId": request_id,
+        "cwd": "/work/demo",
+        "message": {"model": model, "usage": {
+            "input_tokens": input_tokens, "output_tokens": output,
+            "cache_creation_input_tokens": cache_write, "cache_read_input_tokens": cache_read,
+        }},
+    }
+    if effort is not None:
+        entry["effort"] = effort
+    if per_turn is not None:
+        entry["perTurnEffort"] = per_turn
+    return json.dumps(entry)
+
+
 class WindowTests(unittest.TestCase):
     def test_window_starts_at_the_last_fixed_reset(self):
         anchor = datetime(2026, 10, 29, 14, 20, tzinfo=timezone.utc)
@@ -639,6 +658,158 @@ class UsageTests(unittest.TestCase):
         self.assertTrue(cache.exists())
         self.assertIn("alpha", text)
         self.assertEqual(json.loads(cache.read_text())["files"].keys(), json.loads(saved_once)["files"].keys())
+
+    def test_requests_carry_their_effort_and_each_kind_of_token(self):
+        when = self.now - timedelta(minutes=5)
+        self.write_requests([usage_entry("r1", when, "model-a", per_turn="medium", input_tokens=10, output=20, cache_write=30, cache_read=40)])
+
+        (request,) = self.scan()
+
+        self.assertEqual(request["effort"], "medium")
+        self.assertEqual(
+            [request[kind] for kind in token_bar.TOKEN_KINDS], [10, 20, 30, 40]
+        )
+        self.assertEqual(request["tokens"], 60)  # what counts against the limit leaves out cache reads
+
+    def test_the_per_turn_effort_wins_and_odd_values_are_ignored(self):
+        when = self.now - timedelta(minutes=5)
+        self.write_requests([
+            usage_entry("a", when, "m", effort="medium", per_turn="high", output=1),
+            usage_entry("b", when, "m", effort="low", output=1),
+            usage_entry("c", when, "m", output=1),
+            json.dumps({**json.loads(usage_entry("d", when, "m", output=1)), "perTurnEffort": 5, "effort": ""}),
+        ])
+
+        efforts = {request["tokens"] and request["effort"] for request in self.scan()}
+
+        self.assertEqual(efforts, {"high", "low", None})
+
+    def test_an_older_cache_is_read_again_because_it_lacks_the_new_fields(self):
+        when = self.now - timedelta(minutes=5)
+        self.write_requests([usage_entry("r1", when, "model-a", per_turn="high", output=7)])
+        cache = token_bar.scan_cache_path(self.home)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps({"version": 1, "since": 0, "files": {}}))
+
+        (request,) = self.scan()
+
+        self.assertEqual(request["effort"], "high")
+        self.assertEqual(json.loads(cache.read_text())["version"], token_bar.SCAN_CACHE_VERSION)
+
+    def breakdown_requests(self):
+        when = self.now - timedelta(minutes=5)
+        self.write_requests([
+            usage_entry("a", when, "claude-sonnet-5-5", per_turn="medium", output=600),
+            usage_entry("b", when, "claude-sonnet-5-5", per_turn="medium", output=200),
+            usage_entry("c", when, "claude-opus-5-5", per_turn="high", output=200),
+        ])
+        return self.scan()
+
+    def test_the_breakdown_shows_requests_by_model_and_by_effort(self):
+        text = token_bar.breakdown_text(self.breakdown_requests(), "weekly")
+
+        self.assertRegex(text, r"Sonnet 5\.5\s+█+░*\s+80%\s+2 requests")
+        self.assertRegex(text, r"Opus 5\.5\s+█+░*\s+20%\s+1 request\b")
+        self.assertIn("By effort", text)
+        self.assertRegex(text, r"Medium\s+█+░*\s+80%\s+2 requests")
+        self.assertRegex(text, r"High\s+█+░*\s+20%\s+1 request\b")
+
+    def test_there_is_no_effort_section_when_the_logs_record_none(self):
+        self.write_requests([usage_entry("a", self.now - timedelta(minutes=5), "claude-sonnet-5-5", output=100)])
+
+        text = token_bar.breakdown_text(self.scan(), "weekly")
+
+        self.assertNotIn("By effort", text)
+        self.assertIn("By model", text)
+
+    def write_prices(self, table, **extra):
+        path = token_bar.prices_path(self.home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"per_million_tokens": table, **extra}))
+
+    def priced_requests(self):
+        when = self.now - timedelta(minutes=5)
+        self.write_requests([
+            usage_entry("a", when, "model-a", per_turn="high", input_tokens=1_000_000, output=100_000, cache_write=200_000, cache_read=5_000_000),
+            usage_entry("b", when, "family-x-2", per_turn="medium", input_tokens=1_000_000),
+            usage_entry("c", when, "no-price-model", per_turn="medium", output=500),
+        ])
+        return self.scan()
+
+    def test_the_cost_is_worked_out_from_each_kind_of_token_at_the_users_prices(self):
+        self.write_prices({
+            "model-a": {"input": 3, "output": 15, "cache_write": 3.75, "cache_read": 0.3},
+            "family-x-*": {"input": 2},
+        }, currency="€")
+
+        text = token_bar.cost_text(self.priced_requests(), token_bar.load_prices(self.home), "weekly", token_bar.prices_path(self.home))
+
+        # model-a: 3 + 1.5 + 0.75 + 1.5 = 6.75, family-x-2: 2.00.
+        self.assertIn("€      6.75", text)
+        self.assertIn("€      2.00", text)
+        self.assertIn("€      8.75", text)  # the total
+        self.assertIn("No price for: no-price-model (1 request)", text)
+        self.assertIn("By effort", text)
+        self.assertRegex(text, r"High\s+█+░*\s+€\s+6\.75")
+        self.assertIn("isn't billed per token", text)
+
+    def test_the_cost_says_how_to_set_prices_when_there_is_no_file(self):
+        text = token_bar.cost_text(self.priced_requests(), token_bar.load_prices(self.home), "weekly", token_bar.prices_path(self.home))
+
+        self.assertIn("no built-in prices", text)
+        self.assertIn(str(token_bar.prices_path(self.home)), text)
+        self.assertIn('"per_million_tokens"', text)
+        self.assertIn("Models seen in this window: family-x-2, model-a, no-price-model", text)
+
+    def test_the_longest_family_entry_wins_and_unknown_models_have_no_price(self):
+        prices = {"claude-opus-*": {"input": 1}, "claude-opus-5-*": {"input": 2}, "exact": {"input": 9}}
+
+        self.assertEqual(token_bar.price_for("claude-opus-5-5", prices), {"input": 2})
+        self.assertEqual(token_bar.price_for("claude-opus-4-7", prices), {"input": 1})
+        self.assertEqual(token_bar.price_for("exact", prices), {"input": 9})
+        self.assertIsNone(token_bar.price_for("claude-haiku-4-5", prices))
+        self.assertIsNone(token_bar.price_for(None, prices))
+
+    def test_a_prices_file_with_a_mistake_says_what_is_wrong(self):
+        path = token_bar.prices_path(self.home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for content, expected in (
+            ("{}", "per_million_tokens"),
+            (json.dumps({"per_million_tokens": {"m": "cheap"}}), "should list prices"),
+            (json.dumps({"per_million_tokens": {"m": {"inputs": 1}}}), "not a kind of token"),
+            (json.dumps({"per_million_tokens": {"m": {"input": -1}}}), "a number, 0 or more"),
+            (json.dumps({"per_million_tokens": {"m": {"input": "3"}}}), "a number, 0 or more"),
+            (json.dumps({"per_million_tokens": {"m": {"input": True}}}), "a number, 0 or more"),
+            ("not json", "per_million_tokens"),
+        ):
+            path.write_text(content)
+
+            with self.assertRaises(ValueError) as caught:
+                token_bar.load_prices(self.home)
+
+            self.assertIn(expected, str(caught.exception))
+
+    def test_the_cost_command_reads_the_prices_file_and_reports_a_bad_one(self):
+        token_bar.write_json(token_bar.config_path(self.home), {"weekly_only": True})
+        self.priced_requests()
+        self.write_prices({"model-a": {"output": 10}})
+
+        text, code = token_bar.main(["cost"], self.home)
+
+        self.assertEqual(code, 0)
+        self.assertIn("$", text)
+        self.assertIn("No price for:", text)
+
+        token_bar.prices_path(self.home).write_text(json.dumps({"per_million_tokens": {"m": {"input": -5}}}))
+        text, code = token_bar.main(["cost"], self.home)
+        self.assertEqual(code, 1)
+        self.assertIn("a number, 0 or more", text)
+
+    def test_the_cost_says_so_when_there_is_no_usage(self):
+        self.assertEqual(
+            token_bar.cost_text([], None, "weekly", token_bar.prices_path(self.home)),
+            "No Claude Code usage in the current weekly window yet.",
+        )
 
     def synced_setting(self, percent, minutes_ago, limit=1_000_000):
         at = self.now - timedelta(minutes=minutes_ago)

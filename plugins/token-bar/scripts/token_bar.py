@@ -38,7 +38,10 @@ CHART_BAR_WIDTH = 14
 ON_TRACK_BELOW_PERCENT = 85
 WARN_LEVELS = (80, 90)
 SHORTCUT_MARKER = "<!-- installed by token-bar -->"
-SCAN_CACHE_VERSION = 1
+# Bumped when what the scan cache stores changes, so an older cache is read again instead of trusted.
+SCAN_CACHE_VERSION = 2
+# The four kinds of tokens a request records, which are priced separately.
+TOKEN_KINDS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 HISTORY_KEEP_SECONDS = 3 * 3600
 HISTORY_MAX_ENTRIES = 400
 
@@ -210,7 +213,14 @@ def request_from_line(line, path, cutoff):
     if when < cutoff:
         return None
     model = (entry.get("message") or {}).get("model")
-    return request_id, [when.timestamp(), tokens_of(usage), project_name(entry, path), model, bool(entry.get("isSidechain"))]
+    # The effort the request ran at, when the logs record one. Whatever value appears is kept as it is.
+    effort = next((v for v in (entry.get("perTurnEffort"), entry.get("effort")) if isinstance(v, str) and v), None)
+    try:
+        counts = [int(usage.get(kind) or 0) for kind in TOKEN_KINDS]
+        tokens = tokens_of(usage)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return request_id, [when.timestamp(), tokens, project_name(entry, path), model, bool(entry.get("isSidechain")), effort, *counts]
 
 
 def read_new_requests(path, state, cutoff):
@@ -284,12 +294,17 @@ def scan_requests(projects, cutoff, cache_file=None):
         except OSError:
             continue
         files[str(path)] = state
-        for request_id, (stamp, tokens, project, model, subagent) in state["requests"].items():
-            when = datetime.fromtimestamp(stamp, timezone.utc)
+        for request_id, record in state["requests"].items():
+            try:
+                stamp, tokens, project, model, subagent, effort, *counts = record
+                when = datetime.fromtimestamp(stamp, timezone.utc)
+            except (TypeError, ValueError, OverflowError, OSError):
+                continue  # a damaged entry costs one request, not the whole scan
             previous = by_request.get(request_id)
             if when >= cutoff and (previous is None or previous["tokens"] < tokens):
                 by_request[request_id] = {
                     "when": when, "tokens": tokens, "project": project, "model": model, "subagent": subagent,
+                    "effort": effort, **dict(zip(TOKEN_KINDS, counts)),
                 }
     if cache_file:
         save_scan_cache(cache_file, files, cutoff)
@@ -752,14 +767,163 @@ def grouped_shares(requests, key, top=5):
     return shown
 
 
-def share_lines(title, rows, total):
+def share_lines(title, rows, total, notes=None):
+    """A titled list of bars. `notes` maps a row's name to extra text shown after its percent."""
     name_width = 26
     lines = [title]
     for name, tokens in rows:
         share = round(tokens / total * 100)
         shown = name if len(name) <= name_width - 1 else name[: name_width - 2] + "…"
-        lines.append(f"  {shown:<{name_width}}{usage_bar(share, 12)}  {share:>3}%")
+        note = f"  {notes[name]}" if notes and name in notes else ""
+        lines.append(f"  {shown:<{name_width}}{usage_bar(share, 12)}  {share:>3}%{note}")
     return lines
+
+
+def request_notes(requests, key):
+    """{group name: '41.7k requests'} for each group, so a share can be read as a number of requests too."""
+    counts = {}
+    for request in requests:
+        name = key(request)
+        counts[name] = counts.get(name, 0) + 1
+    return {name: f"{format_tokens(count)} request{'' if count == 1 else 's'}" for name, count in counts.items()}
+
+
+def effort_label(request):
+    return (request.get("effort") or "not recorded").capitalize()
+
+
+def model_name(request):
+    return model_label(request["model"])
+
+
+# What each kind of token is called in the prices file, matched to the scan's names for them.
+PRICE_KINDS = {
+    "input": "input_tokens",
+    "output": "output_tokens",
+    "cache_write": "cache_creation_input_tokens",
+    "cache_read": "cache_read_input_tokens",
+}
+PRICES_EXAMPLE = """{
+  "currency": "$",
+  "per_million_tokens": {
+    "your-model-id": {"input": 0.0, "output": 0.0, "cache_write": 0.0, "cache_read": 0.0},
+    "a-family-of-models-*": {"input": 0.0, "output": 0.0}
+  }
+}"""
+
+
+def prices_path(home):
+    return data_dir(home) / "prices.json"
+
+
+def load_prices(home):
+    """(prices, currency symbol) from the user's prices.json, or None when there is no such file.
+
+    token-bar ships with no prices: they change, and they differ by account. Raises ValueError,
+    saying what is wrong, when the file isn't in the shape described in PRICES_EXAMPLE.
+    """
+    path = prices_path(home)
+    if not path.exists():
+        return None
+    data = read_json(path)
+    table = data.get("per_million_tokens") if isinstance(data, dict) else None
+    if not isinstance(table, dict) or not table:
+        raise ValueError(f"{path} should hold a \"per_million_tokens\" table, like this:\n{PRICES_EXAMPLE}")
+    prices = {}
+    for pattern, kinds in table.items():
+        if not isinstance(kinds, dict):
+            raise ValueError(f"{path}: the entry for \"{pattern}\" should list prices, such as {{\"input\": 3.0, \"output\": 15.0}}")
+        for kind, value in kinds.items():
+            if kind not in PRICE_KINDS:
+                raise ValueError(f"{path}: \"{kind}\" is not a kind of token. Use: {', '.join(PRICE_KINDS)}")
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                raise ValueError(f"{path}: the {kind} price for \"{pattern}\" should be a number, 0 or more")
+        prices[pattern] = {kind: float(value) for kind, value in kinds.items()}
+    currency = data.get("currency")
+    return prices, currency if isinstance(currency, str) and currency else "$"
+
+
+def price_for(model, prices):
+    """The prices for a model id: an exact match, else the longest 'family-*' entry that fits, else None."""
+    if not model:
+        return None
+    if model in prices:
+        return prices[model]
+    families = [p for p in prices if p.endswith("*") and model.startswith(p[:-1])]
+    return prices[max(families, key=len)] if families else None
+
+
+def request_cost(request, price):
+    """What one request would cost at these prices, in the price file's currency."""
+    return sum(request[PRICE_KINDS[kind]] * per_million for kind, per_million in price.items()) / 1_000_000
+
+
+def priced_costs(requests, prices, key):
+    """({group name: cost}, {model id: requests with no price}) for these requests."""
+    costs, unpriced = {}, {}
+    for request in requests:
+        price = price_for(request["model"], prices)
+        if price is None:
+            name = request["model"] or "unknown"
+            unpriced[name] = unpriced.get(name, 0) + 1
+            continue
+        name = key(request)
+        costs[name] = costs.get(name, 0.0) + request_cost(request, price)
+    return costs, unpriced
+
+
+def cost_lines(title, costs, symbol):
+    """A titled list of bars for what each group cost, largest first, with a total."""
+    total = sum(costs.values())
+    ordered = sorted(costs.items(), key=lambda item: -item[1])
+    lines = [title]
+    for name, amount in ordered[:6]:
+        share = round(amount / total * 100) if total else 0
+        shown = name if len(name) <= 25 else name[:24] + "…"
+        lines.append(f"  {shown:<26}{usage_bar(share, 12)}  {symbol}{amount:>10,.2f}  {share:>3}%")
+    rest = sum(amount for _, amount in ordered[6:])
+    if rest:
+        lines.append(f"  {'other':<26}{'':<14}  {symbol}{rest:>10,.2f}")
+    lines.append(f"  {'Total':<26}{'':<14}  {symbol}{total:>10,.2f}")
+    return lines
+
+
+def cost_text(requests, loaded, window_label, prices_file):
+    """What the tokens would cost at the user's own prices, by model and by effort."""
+    if not requests:
+        return f"No Claude Code usage in the current {window_label} window yet."
+    if loaded is None:
+        seen = sorted({r["model"] for r in requests if r["model"]})[:8]
+        lines = [
+            "Cost needs a prices file, because token-bar has no built-in prices: they change, and they differ by account.",
+            "Create this file with your own prices per million tokens, then run it again:",
+            f"  {prices_file}",
+            "",
+            PRICES_EXAMPLE,
+            "",
+            "An id ending in * matches a family of models. Kinds you leave out count as 0, and models you leave out show as \"no price\".",
+        ]
+        if seen:
+            lines.append("Models seen in this window: " + ", ".join(seen))
+        return "\n".join(lines)
+
+    prices, symbol = loaded
+    by_model, unpriced = priced_costs(requests, prices, model_name)
+    lines = [f"What these tokens would cost at your prices · current {window_label} window", ""]
+    if by_model:
+        lines += cost_lines("By model", by_model, symbol)
+        if any(request.get("effort") for request in requests):
+            lines += [""] + cost_lines("By effort", priced_costs(requests, prices, effort_label)[0], symbol)
+    if unpriced:
+        missing = ", ".join(f"{name} ({count:,} request{'' if count == 1 else 's'})" for name, count in sorted(unpriced.items()))
+        lines += ["", f"No price for: {missing}"]
+    lines += [
+        "",
+        "This is the cost of the input, output and cache tokens at the prices in your prices.json.",
+        "A subscription isn't billed per token, so it isn't what you pay.",
+        "It shows which models and efforts are the expensive ones.",
+    ]
+    return "\n".join(lines)
 
 
 def window_bounds(home, key, now):
@@ -786,7 +950,11 @@ def breakdown_text(requests, window_label):
 
     lines = [f"Where your tokens went in the current {window_label} window · {format_tokens(total)} tokens counted", ""]
     lines += share_lines("By project", grouped_shares(requests, lambda r: r["project"]), total)
-    lines += [""] + share_lines("By model", grouped_shares(requests, lambda r: model_label(r["model"])), total)
+    lines += [""] + share_lines("By model", grouped_shares(requests, model_name), total, request_notes(requests, model_name))
+    if any(request.get("effort") for request in requests):  # only when the logs record an effort level
+        lines += [""] + share_lines(
+            "By effort", grouped_shares(requests, effort_label), total, request_notes(requests, effort_label)
+        )
     lines += [""] + share_lines("By who made the request", [row for row in kinds if row[1]], total)
     lines += ["", "These are shares of the tokens counted from your logs. Claude weighs tokens in ways the logs",
               "don't show, so they are not exact shares of your limit."]
@@ -1026,7 +1194,7 @@ def shortcut_hint(home):
 SHORTCUT_SKILL = f"""---
 name: token
 description: Show your Claude usage against your limits (5-hour and weekly, or weekly only on Ultra), when the next whole percent lands, and what is using it up. Use when the user runs /token or asks how close they are to their Claude limit.
-argument-hint: [status | verdict | budget | chart | all | breakdown | sync | calibrate | statusline]
+argument-hint: [status | verdict | budget | chart | all | breakdown | cost | sync | calibrate | statusline]
 ---
 
 This is a shortcut for the token-bar plugin. Call the Skill tool with skill `token-bar:token` and args `$ARGUMENTS`, then follow that skill's instructions exactly.
@@ -1101,6 +1269,8 @@ def main(argv, home, stdin_text=None, script_path=None):
     commands.add_parser("install-shortcut")
     breakdown = commands.add_parser("breakdown")
     breakdown.add_argument("window", nargs="?", choices=sorted(WINDOWS))
+    cost = commands.add_parser("cost")
+    cost.add_argument("window", nargs="?", choices=sorted(WINDOWS))
     sync = commands.add_parser("sync")
     sync.add_argument("percent")
     sync.add_argument("window", nargs="?", choices=sorted(WINDOWS))
@@ -1128,13 +1298,16 @@ def main(argv, home, stdin_text=None, script_path=None):
             return calibrate(home, args.window or default_window(home), args.percent, None, now), 0
         if args.command == "weekly-only":
             return set_weekly_only(home, args.setting == "on"), 0
-        if args.command == "breakdown":
+        if args.command in ("breakdown", "cost"):
             window = args.window or default_window(home)
             start = window_bounds(home, window, now)
             cutoff = now - timedelta(days=PROJECTS_DAYS)  # the same horizon as everywhere else, so the cache is shared
             everything = scan_requests(home / ".claude" / "projects", cutoff, scan_cache_path(home))
             requests = [r for r in everything if start <= r["when"] <= now]
-            return breakdown_text(requests, WINDOWS[window]["label"].lower()), 0
+            label = WINDOWS[window]["label"].lower()
+            if args.command == "cost":
+                return cost_text(requests, load_prices(home), label, prices_path(home)), 0
+            return breakdown_text(requests, label), 0
         if args.command == "calibrate":
             return calibrate(home, args.window, args.percent, " ".join(args.reset), now), 0
         if args.command == "statusline":
